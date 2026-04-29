@@ -585,14 +585,23 @@ float g_PsyX_FogColor[3] = { 0.0f, 0.0f, 0.0f };
  * point of the 5-bit quantize: mix() interpolates between the
  * quantized color and the fog color, producing smooth intermediate
  * values that erase the dither pattern entirely. Always quantize
- * last for visible PSX-style dither. */
+ * last for visible PSX-style dither.
+ *
+ * Cell scaling: PSX dither is 4x4 pixels at the native 320-pixel
+ * width. At modern resolutions one PSX pixel maps to several screen
+ * pixels, so a literal 4-pixel dither cell ends up sub-PSX-pixel-
+ * sized and visually invisible. Sample gl_FragCoord through a /4.0
+ * but multiply by a pixelScale so the cell is roughly PSX-pixel-
+ * proportioned (≈3-6 screen pixels per PSX pixel at common windows).
+ * pixelScale=2 keeps dither visible at 1024x768 without becoming
+ * grossly chunky at lower resolutions. */
 #	define GPU_DITHERING_NO_VCOLOR\
 		"		mat4 dither = mat4(\n"\
 		"			-4.0,  +0.0,  -3.0,  +1.0,\n"\
 		"			+2.0,  -2.0,  +3.0,  -1.0,\n"\
 		"			-3.0,  +1.0,  -4.0,  +0.0,\n"\
 		"			+3.0,  -1.0,  +2.0,  -2.0) / 255.0;\n"\
-		"		ivec2 dc = ivec2(fract(gl_FragCoord.xy / 4.0) * 4.0);\n"\
+		"		ivec2 dc = ivec2(fract(gl_FragCoord.xy / 8.0) * 4.0);\n"\
 		"		float dStrength = max(v_texcoord.w, u_ditherForce);\n"\
 		"		fragColor.xyz += vec3(dither[dc.x][dc.y] * dStrength);\n"\
 		"		if (u_ditherForce > 0.5) {\n"\
@@ -1359,6 +1368,21 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 	 * hotkey toggle later) take effect on the next primitive. */
 	if (u_ditherForceLoc != -1)
 		glUniform1f(u_ditherForceLoc, g_cfg_psxDither ? 1.0f : 0.0f);
+
+	{
+		/* One-shot diag: log the resolved dither config + uniform location
+		 * the first time GR_SetTexture runs after init so we can confirm
+		 * what value is actually reaching the shader. Without this, "no
+		 * visible dither" could mean either the path runs but the math
+		 * is wrong, or the uniform never gets pushed. */
+		static int s_logged = 0;
+		if (!s_logged) {
+			s_logged = 1;
+			eprintf("[DITHER] g_cfg_psxDither=%d g_cfg_bilinearFiltering=%d ditherLoc=%d (push=%.1f)\n",
+			        g_cfg_psxDither, g_cfg_bilinearFiltering,
+			        (int)u_ditherForceLoc, g_cfg_psxDither ? 1.0f : 0.0f);
+		}
+	}
 
 	if (g_dbg_texturelessMode) {
 		texture = g_whiteTexture;
