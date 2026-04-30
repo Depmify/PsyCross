@@ -583,29 +583,19 @@ float g_PsyX_FogColor[3] = { 0.0f, 0.0f, 0.0f };
  * the very last operation on the fragment and the fog mix() can't
  * smooth out the quantization steps that produce the visible noise.
  *
- * Resolution-aware cell size: PSX dither is 4x4 pixels at the native
- * 320-pixel width. We pass the viewport width in u_pixelScale (set to
- * windowWidth / 320.0) so each PSX-pixel-equivalent on screen gets
- * its own dither matrix lookup, keeping the pattern visually
- * proportional to PSX regardless of window resolution.
- *
- * Strength: the original PSX matrix range is -4..+3 (out of 255).
- * Multiplied by u_ditherForce (0 or 1) it lands sub-half-step at 5-bit
- * quantize and is barely visible. Scale by 1.6 so at the strongest
- * matrix value (+3) the dither offset becomes ~0.019 — almost a full
- * 5-bit step, pushing pixels distinctly across the quantization
- * boundary. Still in spirit-of-PSX territory; if it ever feels too
- * noisy we can dial back to 1.0. */
+ * 8-pixel cell, native PSX dither strength (1:1 with the original
+ * matrix). Earlier resolution-scaling and 1.6x intensity made it
+ * look chunkier than PSX; this version sticks closer to the
+ * authentic noise level. */
 #	define GPU_DITHERING_NO_VCOLOR\
 		"		mat4 dither = mat4(\n"\
 		"			-4.0,  +0.0,  -3.0,  +1.0,\n"\
 		"			+2.0,  -2.0,  +3.0,  -1.0,\n"\
 		"			-3.0,  +1.0,  -4.0,  +0.0,\n"\
 		"			+3.0,  -1.0,  +2.0,  -2.0) / 255.0;\n"\
-		"		float cellSize = max(u_pixelScale, 1.0);\n"\
-		"		ivec2 dc = ivec2(fract(gl_FragCoord.xy / cellSize) * 4.0);\n"\
+		"		ivec2 dc = ivec2(fract(gl_FragCoord.xy / 8.0) * 4.0);\n"\
 		"		float dStrength = max(v_texcoord.w, u_ditherForce);\n"\
-		"		fragColor.xyz += vec3(dither[dc.x][dc.y] * dStrength * 1.6);\n"\
+		"		fragColor.xyz += vec3(dither[dc.x][dc.y] * dStrength);\n"\
 		"		if (u_ditherForce > 0.5) {\n"\
 		"		    fragColor.xyz = floor(fragColor.xyz * 32.0 + 0.5) / 32.0;\n"\
 		"		}\n"
