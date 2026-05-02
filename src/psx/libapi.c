@@ -969,6 +969,10 @@ int ioctl(int unk00, int unk01, int unk02)
 
 /* ----- Directory enumeration ----- */
 
+/* Forward declaration: firstfile bootstraps the cursor and tail-calls
+ * nextfile, which is defined just below. */
+struct DIRENTRY* nextfile(struct DIRENTRY* dir);
+
 /* Internal cursor for firstfile/nextfile. We embed it in DIRENTRY's `system[]`. */
 struct DIRENTRY* firstfile(char* path, struct DIRENTRY* dir)
 {
