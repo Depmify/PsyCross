@@ -1036,7 +1036,13 @@ int format(char* path)
 	return _card_format(chan);
 }
 
-int rename(char* oldpath, char* newpath)
+/* Signature uses const char* to match the stdio.h `rename` decl
+ * (we include <stdio.h> for fopen/fread above). The libapi.h PSX
+ * decl `int rename(char*, char*)` is commented out in our headers,
+ * so the only in-scope declaration is stdio's. Game callers pass
+ * char* which converts implicitly to const char*; we never write
+ * to the input strings here so const is correct semantically too. */
+int rename(const char* oldpath, const char* newpath)
 {
 	if (!oldpath || !newpath) return 0;
 	int chanA = 0, chanB = 0;
