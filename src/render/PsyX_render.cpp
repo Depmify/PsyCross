@@ -52,6 +52,16 @@ extern SDL_Window* g_window;
 #define MAX_NUM_VERTEX_BUFFERS		(2)
 #define PSX_SCREEN_ASPECT	(240.0f / 320.0f)			// PSX screen is mapped always to this aspect
 
+/* PSX NTSC pixel aspect: a PSX 320×240 framebuffer displayed on a real
+ * 4:3 NTSC CRT presents pixels that are ~1.094× taller than wide. The
+ * 320×240 logical framebuffer therefore visually fills a vertical extent
+ * that's 1.094× the "square pixel" assumption. Without compensating for
+ * this, characters and assets look ~9% wider on a modern display than
+ * the original artists intended (Harry's torso, arms, and legs visibly
+ * thicker on PC vs CRT). Applied during Hor+ ortho setup so 1 horizontal
+ * world unit on screen ≈ 1/1.094 the size of 1 vertical world unit. */
+#define PSX_NTSC_PIXEL_ASPECT (1.09375f)
+
 int g_PreviousBlendMode = BM_NONE;
 int g_PreviousDepthMode = 0;
 int g_PreviousStencilMode = 0;
@@ -1609,6 +1619,12 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 			// extra horizontal content fills the wider display instead of stretching.
 			// Only apply during 3D gameplay states (g_PcHorPlusEnabled=1); 2D UI
 			// screens use 4:3 ortho to avoid exposing adjacent VRAM as garbage.
+			//
+			// PSX NTSC pixel-aspect compensation: multiply the effective scale by
+			// PSX_NTSC_PIXEL_ASPECT (~1.094). PSX's 320×240 framebuffer on a 4:3
+			// CRT had pixels ~1.094× taller than wide; without this factor every
+			// character renders ~9% horizontally fatter than the original (most
+			// visible on Harry's torso/arms/legs).
 			const float psxW = (float)activeDispEnv.disp.w;  // 320
 			const float psxH = (float)activeDispEnv.disp.h;  // 240
 			const float psxAspect = psxW / psxH;             // 4/3
@@ -1616,8 +1632,11 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 				? ((float)g_windowWidth / (float)g_windowHeight)
 				: psxAspect;
 			const float horScale = winAspect / psxAspect;
-			const float margin = (g_PcHorPlusEnabled && horScale > 1.0f)
-				? psxW * (horScale - 1.0f) * 0.5f
+			const float effectiveScale = (g_PcHorPlusEnabled && horScale > 1.0f)
+				? horScale * PSX_NTSC_PIXEL_ASPECT
+				: 1.0f;
+			const float margin = (effectiveScale > 1.0f)
+				? psxW * (effectiveScale - 1.0f) * 0.5f
 				: 0.0f;
 			GR_Ortho2D(-margin, psxW + margin, psxH, 0, -1.0f, 1.0f);
 		}
