@@ -6,7 +6,11 @@
 #include <stdlib.h>
 #include <string.h>
 #if defined(_WIN32)
-#include <direct.h>  /* _mkdir */
+/* Forward-declare _mkdir directly instead of including <direct.h>.
+ * <direct.h> drags in <io.h> which prototypes open / lseek / read /
+ * write with stdio signatures and conflicts with this file's own
+ * PSX-shim implementations of those names. */
+int _mkdir(const char* dirname);
 #else
 #include <sys/stat.h>
 #endif
