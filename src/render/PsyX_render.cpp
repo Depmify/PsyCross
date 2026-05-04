@@ -59,8 +59,18 @@ extern SDL_Window* g_window;
  * this, characters and assets look ~9% wider on a modern display than
  * the original artists intended (Harry's torso, arms, and legs visibly
  * thicker on PC vs CRT). Applied during Hor+ ortho setup so 1 horizontal
- * world unit on screen ≈ 1/1.094 the size of 1 vertical world unit. */
-#define PSX_NTSC_PIXEL_ASPECT (1.09375f)
+ * world unit on screen ≈ 1/1.094 the size of 1 vertical world unit.
+ *
+ * Now a runtime-settable global instead of a macro so the host
+ * application can override it from config (see pc_port/config.cfg
+ * pixel_aspect). The cull-bound sites in the game (vw_calc.c and
+ * Gfx_MeshDraw in bodyprog_80055028.c) read this same global so
+ * their bounds always track the active ortho. Default 1.09375 (CRT
+ * NTSC); 1.0 = square pixels (modern emulator look); 1.143 = 8:7. */
+extern "C" {
+float g_PsxPixelAspect = 1.09375f;
+}
+#define PSX_NTSC_PIXEL_ASPECT (g_PsxPixelAspect)
 
 int g_PreviousBlendMode = BM_NONE;
 int g_PreviousDepthMode = 0;
