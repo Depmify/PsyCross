@@ -594,9 +594,9 @@ float g_PsyX_FogColor[3] = { 0.0f, 0.0f, 0.0f };
 		"			-3.0,  +1.0,  -4.0,  +0.0,\n"\
 		"			+3.0,  -1.0,  +2.0,  -2.0) / 255.0;\n"\
 		"		ivec2 dc = ivec2(fract(gl_FragCoord.xy / 4.0) * 4.0);\n"\
-		"		float dStrength = max(v_texcoord.w, u_ditherForce);\n"\
+		"		float dStrength = max(v_texcoord.w, u_ditherForce) * v_is3d;\n"\
 		"		fragColor.xyz += vec3(dither[dc.x][dc.y] * dStrength);\n"\
-		"		if (u_ditherForce > 0.5) {\n"\
+		"		if (u_ditherForce > 0.5 && v_is3d > 0.5) {\n"\
 		"		    fragColor.xyz = floor(fragColor.xyz * 32.0 + 0.5) / 32.0;\n"\
 		"		}\n"
 
@@ -617,9 +617,9 @@ float g_PsyX_FogColor[3] = { 0.0f, 0.0f, 0.0f };
 		"			-3.0,  +1.0,  -4.0,  +0.0,\n"\
 		"			+3.0,  -1.0,  +2.0,  -2.0) / 255.0;\n"\
 		"		ivec2 dc = ivec2(fract(gl_FragCoord.xy / 8.0) * 4.0);\n"\
-		"		float dStrength = max(v_texcoord.w, u_ditherForce);\n"\
+		"		float dStrength = max(v_texcoord.w, u_ditherForce) * v_is3d;\n"\
 		"		fragColor.xyz += vec3(dither[dc.x][dc.y] * dStrength);\n"\
-		"		if (u_ditherForce > 0.5) {\n"\
+		"		if (u_ditherForce > 0.5 && v_is3d > 0.5) {\n"\
 		"		    fragColor.xyz = floor(fragColor.xyz * 32.0 + 0.5) / 32.0;\n"\
 		"		}\n"
 
@@ -745,6 +745,7 @@ float g_PsyX_FogColor[3] = { 0.0f, 0.0f, 0.0f };
 	"		v_page_clut.xy += c_UVFudge;\n"\
 	"		v_page_clut.zw += c_UVFudge;\n"\
 	GTE_PERSPECTIVE_CORRECTION\
+	"		v_is3d = (a_zw.y > 100.0) ? 1.0 : 0.0;\n"\
 	"		v_z = (gl_Position.z - 40.0) * 0.005;\n"\
 	"		v_fogAmount = clamp(a_extra.z / 127.0, 0.0, 1.0);\n"\
 	"	}\n"
@@ -763,7 +764,7 @@ float g_PsyX_FogColor[3] = { 0.0f, 0.0f, 0.0f };
 	"	uniform float u_pixelScale;\n"\
 	"	uniform vec3 u_fogColor;\n"\
 	"	void main() {\n"\
-	"		if(bilinearFilter > 0)\n"\
+	"		if(bilinearFilter > 0 && v_is3d > 0.5)\n"\
 	"			fragColor = BilinearTextureSample(v_texcoord.xy);\n"\
 	"		else\n"\
 	"			fragColor = NearestTextureSample(v_texcoord.xy);\n"\
@@ -778,6 +779,7 @@ const char* gte_shader_4 =
 	"AFFINE_VARYING vec4 v_page_clut;\n"
 	"varying float v_z;\n"
 	"varying float v_fogAmount;\n"
+	"varying float v_is3d;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
 	"#else\n"
@@ -790,6 +792,7 @@ const char* gte_shader_8 =
 	"AFFINE_VARYING vec4 v_page_clut;\n"
 	"varying float v_z;\n"
 	"varying float v_fogAmount;\n"
+	"varying float v_is3d;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
 	"#else\n"
@@ -802,6 +805,7 @@ const char* gte_shader_16 =
 	"AFFINE_VARYING vec4 v_page_clut;\n"
 	"varying float v_z;\n"
 	"varying float v_fogAmount;\n"
+	"varying float v_is3d;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
 	"#else\n"
@@ -814,6 +818,7 @@ const char* gte_shader_32_rgba =
 	"AFFINE_VARYING vec4 v_page_clut;\n"
 	"varying float v_z;\n"
 	"varying float v_fogAmount;\n"
+	"varying float v_is3d;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
 	"#else\n"
