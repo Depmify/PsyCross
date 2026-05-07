@@ -1268,8 +1268,16 @@ void GR_SetupClipMode(const RECT16* rect, int enable)
 	if (!scissorOn)
 		return;
 
+	// Runtime gate: same as the ortho selection — non-PGXP path uses
+	// emuScreenAspect=1 (no widescreen aspect remap) so the scissor
+	// rectangle stays in pixel-space coordinates that match the legacy
+	// 2D ortho. With PGXP at compile time but off at runtime, falling
+	// through to the PGXP aspect calc would shrink the scissor and
+	// cause clipping inconsistent with the prim ortho.
 #if USE_PGXP
-	const float emuScreenAspect = 1.0f / (PSX_SCREEN_ASPECT * (float)g_windowWidth / (float)g_windowHeight);
+	const float emuScreenAspect = g_PsxUsePgxp
+		? (1.0f / (PSX_SCREEN_ASPECT * (float)g_windowWidth / (float)g_windowHeight))
+		: 1.0f;
 #else
 	const float emuScreenAspect = 1.0f;
 #endif
@@ -1308,29 +1316,32 @@ void GR_SetupClipMode(const RECT16* rect, int enable)
 void PsyX_GetPSXWidescreenMappedViewport(struct _RECT16* rect)
 {
 #if USE_PGXP
-	float psxScreenW, psxScreenH;
-	float emuScreenAspect;
+	if (g_PsxUsePgxp)
+	{
+		float psxScreenW, psxScreenH;
+		float emuScreenAspect;
 
-	emuScreenAspect = (float)(g_windowWidth) / (float)(g_windowHeight);
+		emuScreenAspect = (float)(g_windowWidth) / (float)(g_windowHeight);
 
-	psxScreenW = activeDispEnv.disp.w;
-	psxScreenH = activeDispEnv.disp.h;
+		psxScreenW = activeDispEnv.disp.w;
+		psxScreenH = activeDispEnv.disp.h;
 
-	rect->x = activeDispEnv.screen.x;
-	rect->y = activeDispEnv.screen.y;
+		rect->x = activeDispEnv.screen.x;
+		rect->y = activeDispEnv.screen.y;
 
-	rect->w = psxScreenW * emuScreenAspect * PSX_SCREEN_ASPECT; // windowWidth;
-	rect->h = psxScreenH; // windowHeight;
+		rect->w = psxScreenW * emuScreenAspect * PSX_SCREEN_ASPECT; // windowWidth;
+		rect->h = psxScreenH; // windowHeight;
 
-	rect->x -= (rect->w - activeDispEnv.disp.w) / 2;
+		rect->x -= (rect->w - activeDispEnv.disp.w) / 2;
 
-	rect->w += rect->x;
-#else
+		rect->w += rect->x;
+		return;
+	}
+#endif
 	rect->x = activeDispEnv.screen.x;
 	rect->y = activeDispEnv.screen.y;
 	rect->w = activeDispEnv.disp.w;
 	rect->h = activeDispEnv.disp.h;
-#endif
 }
 
 void GR_SetShader(const ShaderID shader)
@@ -1625,11 +1636,21 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 	if (enable)
 	{
 		// setup render target viewport
+		// Runtime PGXP gate (matches the default-viewport path below):
+		// when g_PsxUsePgxp is 0 we use the legacy pixel-coord ortho even
+		// if USE_PGXP=1 was compiled in, because prim-emit writes
+		// vertices in pixel space (a_zw=0 → shader takes the 2D-ortho
+		// branch via Projection*a_position.xy). Without this gate, an
+		// offscreen render target with PGXP off mapped pixel-coord
+		// vertices through fractional-coord ortho (-0.5..0.5) and clipped
+		// every prim out — Silent Hill's title-screen background uses
+		// dfe=0 which routes here, so the menu went black.
 #if USE_PGXP
-		GR_Ortho2D(-0.5f, 0.5f, 0.5f, -0.5f, -1.0f, 1.0f);
-#else
-		GR_Ortho2D(0, offscreenRect->w, offscreenRect->h, 0, -1.0f, 1.0f);
+		if (g_PsxUsePgxp)
+			GR_Ortho2D(-0.5f, 0.5f, 0.5f, -0.5f, -1.0f, 1.0f);
+		else
 #endif
+			GR_Ortho2D(0, offscreenRect->w, offscreenRect->h, 0, -1.0f, 1.0f);
 	}
 	else
 	{

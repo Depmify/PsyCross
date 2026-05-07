@@ -100,9 +100,22 @@ void DrawEnvOffset(float& ofsX, float& ofsY)
 
 // remaps screen coordinates to [0..1]
 // without clamping
+//
+// PC port (Silent Hill): runtime-gated. Only do the fractional remap when
+// g_PsxUsePgxp is on, because the PGXP shader path expects vertices in
+// (-0.5..0.5) clip-space-ish coords and the non-PGXP shader path expects
+// raw pixel coords (the legacy GR_Ortho2D(0, psxW+margin, psxH, 0) maps
+// those to NDC). With USE_PGXP=1 compiled in but the runtime flag off,
+// the unconditional pre-version remapped pixel coords down to (-0.5..0.5)
+// and then ran them through a 0..640-pixel ortho — every vertex landed
+// far outside the clip cube and the whole frame went black. Affected
+// every prim that came through MakeVertex* (i.e. nearly all 2D UI).
 inline void ScreenCoordsToEmulator(GrVertex* vertex, int count)
 {
 #if USE_PGXP
+	if (!g_PsxUsePgxp)
+		return;
+
 	float w, h;
 	DrawEnvDimensions(w, h);
 
