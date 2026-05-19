@@ -1467,7 +1467,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 #if USE_OPENGL
 	glBindTexture(GL_TEXTURE_2D, texture);
 	if(u_bilinearFilterLoc != -1)
-		glUniform1i(u_bilinearFilterLoc, g_cfg_bilinearFiltering);
+		glUniform1i(u_bilinearFilterLoc, g_cfg_bilinearFiltering && !g_PsxDitherSuppressed);
 
 #endif
 
