@@ -894,7 +894,7 @@ void ParsePrimitivesLinkedList(u_long* p, int singlePrimitive)
 #if !USE_PGXP
 		const float otBucketStep = (g_currentOTBucketCount > 1)
 			? (2.0f / (float)(g_currentOTBucketCount - 1)) : 0.0f;
-		g_otBucketDepth = 1.0f;
+		g_otBucketDepth = -1.0f;
 #endif
 		// walk OT_TAG linked list with safety guards
 		uintptr_t basePacket = reinterpret_cast<uintptr_t>(p);
@@ -960,7 +960,7 @@ void ParsePrimitivesLinkedList(u_long* p, int singlePrimitive)
 			lastSplit.numVerts = g_vertexIndex - lastSplit.startVertex;
 
 #if !USE_PGXP
-			g_otBucketDepth -= otBucketStep;
+			g_otBucketDepth += otBucketStep;
 #endif
 
 			if (isendprim(basePacket))
