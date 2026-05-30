@@ -210,6 +210,10 @@ extern "C" {
 #endif
 extern void PsyX_CaptureGteDepths(void* prim);
 extern void PsyX_ClearGteDepthTable(void);
+/* Called by world-geometry renderers (Gfx_MeshDraw etc.) to give the depth
+ * system the polygon's true per-vertex GTE SZ values before addPrim, since
+ * the GTE SZ FIFO is stale at addPrim time (transforms ran earlier in bulk). */
+extern void PsyX_SetNextPrimSz(unsigned short s0, unsigned short s1, unsigned short s2, unsigned short s3, int arg3);
 #ifdef __cplusplus
 }
 #endif

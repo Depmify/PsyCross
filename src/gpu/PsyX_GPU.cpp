@@ -54,13 +54,41 @@ static SZEntry g_szTable[SZ_TABLE_SIZE];
 static uint32_t g_szMaxThisFrame = 0;
 static uint32_t g_szMaxPrevFrame = 0;
 
+// World-geometry renderers (Gfx_MeshDraw) bulk-transform vertices before the
+// polygon loop, so the GTE SZ FIFO is stale at each polygon's addPrim call.
+// They call PsyX_SetNextPrimSz with the polygon's field_18C SZ values so the
+// next PsyX_CaptureGteDepths invocation uses the correct per-vertex depths.
+static uint16_t g_primSzNext[4];
+static int g_primSzNextValid = 0;
+
+extern "C" void PsyX_SetNextPrimSz(unsigned short s0, unsigned short s1, unsigned short s2, unsigned short s3, int arg3)
+{
+	(void)arg3;
+	uint16_t avg   = (uint16_t)(((unsigned)s0 + s1 + s2 + s3) >> 2);
+	uint16_t avg_q = (uint16_t)((avg >> 6) << 6);
+	// Calibrate with unquantised real max so character/item GL depths stay accurate.
+	uint32_t mx = s0 > s1 ? s0 : s1;
+	if (s2 > mx) mx = s2;
+	if (s3 > mx) mx = s3;
+	if (mx > g_szMaxThisFrame) g_szMaxThisFrame = mx;
+	g_primSzNext[0] = g_primSzNext[1] = g_primSzNext[2] = g_primSzNext[3] = avg_q;
+	g_primSzNextValid = 1;
+}
+
 extern "C" void PsyX_CaptureGteDepths(void* prim)
 {
 	uintptr_t key = (uintptr_t)prim;
 	int slot = (int)((key >> 2) & SZ_TABLE_MASK);
 
-	uint16_t s0 = (uint16_t)C2_SZ0, s1 = (uint16_t)C2_SZ1;
-	uint16_t s2 = (uint16_t)C2_SZ2, s3 = (uint16_t)C2_SZ3;
+	uint16_t s0, s1, s2, s3;
+	if (g_primSzNextValid) {
+		s0 = g_primSzNext[0]; s1 = g_primSzNext[1];
+		s2 = g_primSzNext[2]; s3 = g_primSzNext[3];
+		g_primSzNextValid = 0;
+	} else {
+		s0 = (uint16_t)C2_SZ0; s1 = (uint16_t)C2_SZ1;
+		s2 = (uint16_t)C2_SZ2; s3 = (uint16_t)C2_SZ3;
+	}
 
 	// Track per-frame SZ maximum for global depth calibration
 	uint32_t mx = s0 > s1 ? s0 : s1;
@@ -88,6 +116,7 @@ extern "C" void PsyX_ClearGteDepthTable(void)
 	g_szMaxPrevFrame = g_szMaxThisFrame;
 	g_szMaxThisFrame = 0;
 	memset(g_szTable, 0, sizeof(g_szTable));
+	g_primSzNextValid = 0;
 }
 
 static bool PsyX_LookupGteDepths(const void* prim, uint16_t* sz)
@@ -106,19 +135,15 @@ static bool PsyX_LookupGteDepths(const void* prim, uint16_t* sz)
 	return false;
 }
 
-// Overrides flat bucket z with physically-correct per-vertex GL depth.
-// For quads (4x RTPS): SZ0=V0,SZ1=V1,SZ2=V2,SZ3=V3; buffer order V0,V1,V3,V2 (swap).
-//   → sz[0]→v[0], sz[1]→v[1], sz[3]→v[2], sz[2]→v[3].
-// For tris (3x RTPS): SZ1=V0,SZ2=V1,SZ3=V2 (SZ0 stale).
-//   → sz[1]→v[0], sz[2]→v[1], sz[3]→v[2].
-// Formula: z_view = 1 - 2*sz_v/g_szMaxPrevFrame  (window_depth = sz_v/max_sz).
-// Uses a global per-frame SZ scale so cross-primitive depth ordering is physically
-// correct regardless of which OT bucket a polygon was assigned to.  The bucket-anchored
-// formula was correct within a primitive but failed when two primitives were in wrong
-// buckets relative to each other (Z-fighting / wrong face winning the depth test).
+// Overrides flat bucket z with GTE SZ-based depth.
+// Uses average SZ across polygon vertices: geometrically more accurate than max_SZ,
+// which can be dominated by a single near vertex and sort adjacent coplanar surfaces
+// into the wrong OT depth relationship.  Uniform depth per polygon (all vertices
+// share one value) eliminates the per-vertex interpolation that caused diffuse
+// Z-fighting along polygon edges.
 static void ApplyGtePerVertexDepth(GrVertex* vertex, const P_TAG* polyTag, bool isQuad)
 {
-	if (g_szMaxPrevFrame < 1) return;  // no calibration yet (first frame)
+	if (g_szMaxPrevFrame < 1) return;
 
 	uint16_t sz[4];
 	if (!PsyX_LookupGteDepths(polyTag, sz))
@@ -129,22 +154,18 @@ static void ApplyGtePerVertexDepth(GrVertex* vertex, const P_TAG* polyTag, bool 
 		sv0 = (float)sz[0]; sv1 = (float)sz[1];
 		sv2 = (float)sz[3]; sv3 = (float)sz[2];  // buffer[2]=V3, buffer[3]=V2
 	} else {
-		sv0 = (float)sz[1]; sv1 = (float)sz[2]; sv2 = (float)sz[3];  // SZ1=V0 etc.
+		sv0 = (float)sz[1]; sv1 = (float)sz[2]; sv2 = (float)sz[3];
 	}
 
 	float sz_avg = isQuad ? (sv0 + sv1 + sv2 + sv3) * 0.25f
 	                      : (sv0 + sv1 + sv2) * (1.0f / 3.0f);
-	if (sz_avg < 1.0f) return;  // no GTE transform (2D/HUD prim) — keep bucket depth
+	if (sz_avg < 1.0f) return;  // 2D/HUD prim — keep bucket depth
 
-	float rmax = 1.0f / (float)g_szMaxPrevFrame;
-
-#define CLAMP1(v) ((v) < -1.0f ? -1.0f : (v) > 1.0f ? 1.0f : (v))
-	vertex[0].z = CLAMP1(1.0f - 2.0f * sv0 * rmax);
-	vertex[1].z = CLAMP1(1.0f - 2.0f * sv1 * rmax);
-	vertex[2].z = CLAMP1(1.0f - 2.0f * sv2 * rmax);
-	if (isQuad)
-		vertex[3].z = CLAMP1(1.0f - 2.0f * sv3 * rmax);
-#undef CLAMP1
+	float z_val = 1.0f - 2.0f * sz_avg * (1.0f / (float)g_szMaxPrevFrame);
+	if (z_val < -1.0f) z_val = -1.0f;
+	if (z_val >  1.0f) z_val =  1.0f;
+	vertex[0].z = vertex[1].z = vertex[2].z = z_val;
+	if (isQuad) vertex[3].z = z_val;
 }
 
 struct GPUDrawSplit
