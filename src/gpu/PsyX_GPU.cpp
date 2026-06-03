@@ -1487,7 +1487,7 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 		MakeColourQuad(firstVertex, shadeTexOn, &poly->r0, &poly->r1, &poly->r3, &poly->r2);
 
 		// Copy per-vertex fog factor from pad bytes (note: MakeColourQuad swaps v2/v3)
-		firstVertex[0]._p0 = poly->p1;  // v0: shares v1's fog (code byte occupies v0's pad)
+		firstVertex[0]._p0 = (unsigned char)poly->pad2;  // v0: own fog (game carries it in pad2; v0 color word's pad is the code byte)
 		firstVertex[1]._p0 = poly->p1;  // v1
 		firstVertex[2]._p0 = poly->p3;  // v3 (buffer[2] = poly vertex 3 due to swap)
 		firstVertex[3]._p0 = poly->p2;  // v2 (buffer[3] = poly vertex 2 due to swap)

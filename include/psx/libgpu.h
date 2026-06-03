@@ -307,7 +307,7 @@ extern void PsyX_SetNextPrimSz(unsigned short s0, unsigned short s1, unsigned sh
 #define setPolyF4(p)	setlen(p, 5),  setcode(p, 0x28)
 #define setPolyFT4(p)	setlen(p, 9),  setcode(p, 0x2c)
 #define setPolyG4(p)	setlen(p, 8),  setcode(p, 0x38), (p)->pad1 = 0, (p)->pad2 = 0, (p)->pad3 = 0
-#define setPolyGT4(p)	setlen(p, 12), setcode(p, 0x3c), (p)->p1 = 0, (p)->p2 = 0, (p)->p3 = 0
+#define setPolyGT4(p)	setlen(p, 12), setcode(p, 0x3c), (p)->p1 = 0, (p)->p2 = 0, (p)->p3 = 0, (p)->pad2 = 0
 
 #define setSprt8(p)	setlen(p, 3),  setcode(p, 0x74)
 #define setSprt16(p)	setlen(p, 3),  setcode(p, 0x7c)
