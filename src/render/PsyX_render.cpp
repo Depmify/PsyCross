@@ -337,7 +337,11 @@ int GR_InitialiseGLContext(char* windowName, int fullscreen)
 #if defined(__ANDROID__)
 	windowFlags |= SDL_WINDOW_FULLSCREEN;
 #else
-	if (fullscreen)
+	/* 0 = windowed, 1 = exclusive fullscreen, 2 = borderless (fullscreen
+	 * desktop: covers the screen at desktop resolution, no mode switch). */
+	if (fullscreen == 2)
+		windowFlags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
+	else if (fullscreen)
 		windowFlags |= SDL_WINDOW_FULLSCREEN;
 #endif
 
