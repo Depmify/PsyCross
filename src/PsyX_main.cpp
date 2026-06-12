@@ -879,6 +879,17 @@ char PsyX_BeginScene()
 		GR_Clear(clipenv.x, clipenv.y, clipenv.w, clipenv.h, r, g, b);
 	}
 
+	/* PC port: while the game is frozen (pause / console / map message),
+	 * re-present the last captured gameplay frame so this frame's UI prims
+	 * draw on top of the frozen world — PSX got this for free because it
+	 * never auto-cleared the framebuffer. */
+	{
+		extern int g_PsxPresentLastFrame;
+		extern void GR_PresentLastFrame(void);
+		if (g_PsxPresentLastFrame)
+			GR_PresentLastFrame();
+	}
+
 	begin_scene_flag = 1;
 
 	PsyX_Log_Flush();
@@ -905,6 +916,13 @@ void PsyX_EndScene()
 	/* PC port: g_PsxSkipFramebufferStore is a per-frame opt-out — the game must
 	 * re-set it each tick during a TIM-protect screen (e.g. paper-map pickup). */
 	g_PsxSkipFramebufferStore = 0;
+
+	/* PC port: keep a copy of every composed frame for freeze-frame
+	 * presentation (skipped internally on frames that re-presented it). */
+	{
+		extern void GR_CaptureLastFrame(void);
+		GR_CaptureLastFrame();
+	}
 
 	GR_SwapWindow();
 }

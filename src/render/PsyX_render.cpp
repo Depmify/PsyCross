@@ -141,6 +141,23 @@ int vram_need_update = 1;
 
 /* PC port: runtime gate for framebuffer→VRAM feedback. See PsyX_render.h. */
 int g_PsxSkipFramebufferStore = 0;
+
+/* PC port: freeze-frame presentation for pause/console/message states.
+ * PSX hardware never auto-cleared the framebuffer, so SH1's pause screen
+ * simply stopped drawing the world and the last gameplay frame stayed
+ * visible under the PAUSED text. PsyCross clears every frame, so the
+ * game instead sets g_PsxPresentLastFrame while frozen: every EndScene
+ * captures the composed frame into a texture (skipped on frames where
+ * the capture was presented, so UI text never bakes in), and BeginScene
+ * re-presents it under the new frame's prims. The game sets the flag on
+ * freeze ENTRY (same tick) and clears it on exit. */
+int g_PsxPresentLastFrame = 0;
+static GLuint g_freezeFrameTex = 0;
+static GLuint g_freezeFrameFBO = 0;
+static int    g_freezeFrameW = 0;
+static int    g_freezeFrameH = 0;
+static int    g_freezeFrameValid = 0;
+static int    g_freezePresentedThisFrame = 0;
 int framebuffer_need_update = 0;
 
 #if defined(__EMSCRIPTEN__) || defined(__RPI__) || defined(__ANDROID__)
@@ -1827,6 +1844,74 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 		}
 
 	}
+#endif
+}
+
+/* See g_PsxPresentLastFrame above. Called from PsyX_EndScene after the
+ * frame is fully composed in the backbuffer, before the swap. */
+void GR_CaptureLastFrame(void)
+{
+#if USE_OPENGL && USE_FRAMEBUFFER_BLIT
+	/* A frame that re-presented the capture must not be re-captured,
+	 * or the UI text drawn on top would bake into the frozen image. */
+	if (g_freezePresentedThisFrame)
+	{
+		g_freezePresentedThisFrame = 0;
+		return;
+	}
+
+	if (!g_freezeFrameTex)
+	{
+		glGenTextures(1, &g_freezeFrameTex);
+		glGenFramebuffers(1, &g_freezeFrameFBO);
+	}
+
+	if (g_freezeFrameW != g_windowWidth || g_freezeFrameH != g_windowHeight)
+	{
+		g_freezeFrameW = g_windowWidth;
+		g_freezeFrameH = g_windowHeight;
+		glBindTexture(GL_TEXTURE_2D, g_freezeFrameTex);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, g_freezeFrameW, g_freezeFrameH, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glBindTexture(GL_TEXTURE_2D, 0);
+		g_freezeFrameValid = 0;
+	}
+
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_freezeFrameFBO);
+	glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_freezeFrameTex, 0);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+
+	glBlitFramebuffer(0, 0, g_windowWidth, g_windowHeight,
+		0, 0, g_freezeFrameW, g_freezeFrameH,
+		GL_COLOR_BUFFER_BIT, GL_NEAREST);
+
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+
+	g_freezeFrameValid = 1;
+#endif
+}
+
+/* Called from PsyX_BeginScene right after the frame clear while the game
+ * holds g_PsxPresentLastFrame: re-presents the captured frame so this
+ * frame's prims (PAUSED text, console, messages) draw on top of it. */
+void GR_PresentLastFrame(void)
+{
+#if USE_OPENGL && USE_FRAMEBUFFER_BLIT
+	if (!g_freezeFrameValid)
+		return;
+
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, g_freezeFrameFBO);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+
+	glBlitFramebuffer(0, 0, g_freezeFrameW, g_freezeFrameH,
+		0, 0, g_windowWidth, g_windowHeight,
+		GL_COLOR_BUFFER_BIT, GL_NEAREST);
+
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+
+	g_freezePresentedThisFrame = 1;
 #endif
 }
 
