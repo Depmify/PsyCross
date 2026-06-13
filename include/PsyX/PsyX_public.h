@@ -81,6 +81,7 @@ extern "C" {
 #endif
 void PGXP_PushVertex(int sx, int sy, float fx, float fy, float fw);
 void PGXP_FrameReset(void);
+void PGXP_CoverageTick(void); /* per-frame; dumps [PGXP] hit/miss when on */
 #if defined(__cplusplus)
 }
 #endif

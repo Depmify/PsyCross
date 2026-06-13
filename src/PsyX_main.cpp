@@ -907,6 +907,8 @@ void PsyX_EndScene()
 	assert(begin_scene_flag);
 	begin_scene_flag = 0;
 
+	PGXP_CoverageTick();
+
 	GR_EndScene();
 
 #ifndef PSYX_SKIP_FRAMEBUFFER_STORE

@@ -100,6 +100,23 @@ static int PGXP_LookupHinted(int sx, int sy, unsigned short hint16, float* ox, f
  * (rawX,rawY = prim's stored x/y, the GTE output BEFORE the draw-env offset).
  * ofsX/ofsY are added so ppx/ppy line up with vertex.x/.y. pw=0 => shader
  * treats the vertex as affine. Only called when PGXP is on. */
+/* Coverage instrumentation: how many 3D vertices found their precise data vs
+ * fell back to affine. Dumped ~once a second when PGXP is on so we can tell if
+ * tweaking should target the hit rate or the math. */
+static unsigned int s_pgxpHit = 0, s_pgxpMiss = 0, s_pgxpFrames = 0;
+extern "C" void PGXP_CoverageTick(void)
+{
+	if (!g_PsxUsePgxp) { s_pgxpHit = s_pgxpMiss = 0; return; }
+	if (++s_pgxpFrames >= 60)
+	{
+		unsigned int tot = s_pgxpHit + s_pgxpMiss;
+		if (tot)
+			eprintinfo("[PGXP] coverage: %u/%u hits (%.1f%%) over %u frames\n",
+				s_pgxpHit, tot, 100.0 * (double)s_pgxpHit / (double)tot, s_pgxpFrames);
+		s_pgxpHit = s_pgxpMiss = s_pgxpFrames = 0;
+	}
+}
+
 static inline void PgxpFillVertex(GrVertex* v, int rawX, int rawY, float ofsX, float ofsY, unsigned short hint)
 {
 	float fx, fy, fw;
@@ -108,12 +125,14 @@ static inline void PgxpFillVertex(GrVertex* v, int rawX, int rawY, float ofsX, f
 		v->ppx = fx + ofsX;
 		v->ppy = fy + ofsY;
 		v->ppw = fw;
+		s_pgxpHit++;
 	}
 	else
 	{
 		v->ppx = (float)v->x;
 		v->ppy = (float)v->y;
 		v->ppw = 0.0f; /* miss -> affine */
+		s_pgxpMiss++;
 	}
 }
 
