@@ -165,6 +165,15 @@ static SZEntry g_szTable[SZ_TABLE_SIZE];
 static uint32_t g_szMaxThisFrame = 0;
 static uint32_t g_szMaxPrevFrame = 0;
 
+/* PGXP depth fix: the previous frame's max SZ, used to normalize per-vertex
+ * SZ3 into NDC depth in the shader (same formula as ApplyGtePerVertexDepth but
+ * per-vertex + unquantized, so coplanar faces no longer share a depth bucket).
+ * Returns 1 as a safe floor before the first frame. */
+extern "C" float PGXP_GetSzMax(void)
+{
+	return (g_szMaxPrevFrame < 1) ? 1.0f : (float)g_szMaxPrevFrame;
+}
+
 // World-geometry renderers (Gfx_MeshDraw) bulk-transform vertices before the
 // polygon loop, so the GTE SZ FIFO is stale at each polygon's addPrim call.
 // They call PsyX_SetNextPrimSz with the polygon's field_18C SZ values so the

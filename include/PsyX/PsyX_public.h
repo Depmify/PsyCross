@@ -82,6 +82,7 @@ extern "C" {
 void PGXP_PushVertex(int sx, int sy, float fx, float fy, float fw);
 void PGXP_FrameReset(void);
 void PGXP_CoverageTick(void); /* per-frame; dumps [PGXP] hit/miss when on */
+float PGXP_GetSzMax(void);    /* prev-frame max SZ for shader depth normalize */
 #if defined(__cplusplus)
 }
 #endif

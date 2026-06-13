@@ -577,6 +577,7 @@ typedef struct
 	GLint texelSizeLoc;
 	GLint fogColorLoc;
 	GLint pgxpEnabledLoc;
+	GLint szMaxLoc;
 #endif
 } GTEShader;
 
@@ -595,6 +596,7 @@ GLint u_pixelScaleLoc;
 GLint u_texelSizeLoc;
 GLint u_fogColorLoc;
 GLint u_pgxpEnabledLoc;
+GLint u_szMaxLoc;
 
 float g_PsyX_FogColor[3] = { 0.0f, 0.0f, 0.0f };
 
@@ -769,7 +771,9 @@ float g_PsyX_FogColor[3] = { 0.0f, 0.0f, 0.0f };
 #define GTE_PERSPECTIVE_CORRECTION \
 		"	if (u_pgxpEnabled > 0 && a_pgxp.z > 0.0) {\n"\
 		"		vec4 b = Projection * vec4(a_pgxp.xy, a_zw.x, 1.0);\n"\
-		"		gl_Position = vec4(b.xyz * a_pgxp.z, b.w * a_pgxp.z);\n"\
+		"		float W = a_pgxp.z;\n"\
+		"		float zc = clamp(2.0 * a_pgxp.z / u_szMax - 1.0, -1.0, 1.0);\n"\
+		"		gl_Position = vec4(b.xy * W, zc * W, W);\n"\
 		"	} else {\n"\
 		"		gl_Position = Projection * vec4(a_position.xy, a_zw.x, 1.0);\n"\
 		"	}\n"
@@ -784,6 +788,7 @@ float g_PsyX_FogColor[3] = { 0.0f, 0.0f, 0.0f };
 	"	uniform mat4 Projection;\n"\
 	"	uniform mat4 Projection3D;\n"\
 	"	uniform int u_pgxpEnabled;\n"\
+	"	uniform float u_szMax;\n"\
 	"	const vec2 c_UVFudge = vec2(0.00025, 0.00025);\n"\
 	"	void main() {\n"\
 	"		v_texcoord = a_texcoord;\n"\
@@ -1110,6 +1115,7 @@ void GR_CompilePSXShader(GTEShader* sh, const char* source)
 	sh->texelSizeLoc = glGetUniformLocation(sh->shader, "texelSize");
 	sh->fogColorLoc = glGetUniformLocation(sh->shader, "u_fogColor");
 	sh->pgxpEnabledLoc = glGetUniformLocation(sh->shader, "u_pgxpEnabled");
+	sh->szMaxLoc = glGetUniformLocation(sh->shader, "u_szMax");
 #endif
 }
 
@@ -1394,6 +1400,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_texelSizeLoc = -1;
 		u_fogColorLoc = g_gte_shader_4.fogColorLoc;
 		u_pgxpEnabledLoc = g_gte_shader_4.pgxpEnabledLoc;
+		u_szMaxLoc = g_gte_shader_4.szMaxLoc;
 		break;
 	case TF_8_BIT:
 		GR_SetShader(g_gte_shader_8.shader);
@@ -1405,6 +1412,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_texelSizeLoc = -1;
 		u_fogColorLoc = g_gte_shader_8.fogColorLoc;
 		u_pgxpEnabledLoc = g_gte_shader_8.pgxpEnabledLoc;
+		u_szMaxLoc = g_gte_shader_8.szMaxLoc;
 		break;
 	case TF_16_BIT:
 		GR_SetShader(g_gte_shader_16.shader);
@@ -1416,6 +1424,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_texelSizeLoc = -1;
 		u_fogColorLoc = g_gte_shader_16.fogColorLoc;
 		u_pgxpEnabledLoc = g_gte_shader_16.pgxpEnabledLoc;
+		u_szMaxLoc = g_gte_shader_16.szMaxLoc;
 		break;
 	case TF_32_BIT_RGBA:
 		GR_SetShader(g_gte_shader_32_rgba.shader);
@@ -1427,6 +1436,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_texelSizeLoc = g_gte_shader_32_rgba.texelSizeLoc;
 		u_fogColorLoc = g_gte_shader_32_rgba.fogColorLoc;
 		u_pgxpEnabledLoc = g_gte_shader_32_rgba.pgxpEnabledLoc;
+		u_szMaxLoc = g_gte_shader_32_rgba.szMaxLoc;
 		break;
 	}
 
@@ -1438,6 +1448,11 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 	 * blocky tree leaves). */
 	if (u_pgxpEnabledLoc != -1)
 		glUniform1i(u_pgxpEnabledLoc, g_PsxUsePgxp);
+
+	/* PGXP depth normalize: prev-frame max SZ. Lets the vertex shader turn each
+	 * vertex's unquantized SZ3 into continuous NDC depth (Z-fight fix). */
+	if (u_szMaxLoc != -1)
+		glUniform1f(u_szMaxLoc, PGXP_GetSzMax());
 
 	if (u_fogColorLoc != -1)
 		glUniform3fv(u_fogColorLoc, 1, g_PsyX_FogColor);
