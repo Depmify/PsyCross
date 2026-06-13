@@ -117,9 +117,131 @@ extern "C" void PGXP_CoverageTick(void)
 	}
 }
 
+/* ---- Deterministic coverage (phase 1) -------------------------------------
+ * The (x,y)-key ring above is heuristic: world geometry bulk-transforms its
+ * vertices into a scratch buffer and copies the integer coords into prims by
+ * index, so the ring hint is stale for ~30% of vertices (they were pushed long
+ * before the prim's addPrim). To match deterministically we instead key the
+ * precise coord by the SCRATCH ADDRESS the GTE wrote (PGXP_MapPut, from the
+ * store macros), then the emit site tells us which scratch entries a prim used
+ * (PsyX_SetNextPrimPgxp) so we can park the resolved precise verts and store
+ * them per-prim at addPrim. Order-independent: each vertex carries its integer
+ * key so MakeVertex matches regardless of winding. Ring stays the fallback. */
+struct PgxpAddrEntry { uintptr_t key; float x, y, w; };
+#define PGXP_ADDR_BITS 16
+#define PGXP_ADDR_SIZE (1 << PGXP_ADDR_BITS)
+#define PGXP_ADDR_MASK (PGXP_ADDR_SIZE - 1)
+static PgxpAddrEntry s_pgxpAddr[PGXP_ADDR_SIZE];
+
+extern "C" void PGXP_MapPut(void* addr, float x, float y, float w)
+{
+	uintptr_t k = (uintptr_t)addr;
+	unsigned s = (unsigned)((k >> 2) * 2654435761u) & PGXP_ADDR_MASK;
+	for (int i = 0; i < 16; i++) {
+		PgxpAddrEntry* e = &s_pgxpAddr[(s + i) & PGXP_ADDR_MASK];
+		if (e->key == 0 || e->key == k) { e->key = k; e->x = x; e->y = y; e->w = w; return; }
+	}
+	PgxpAddrEntry* e = &s_pgxpAddr[s];   /* probe exhausted: overwrite base */
+	e->key = k; e->x = x; e->y = y; e->w = w;
+}
+
+static bool PGXP_MapGet(void* addr, float* x, float* y, float* w)
+{
+	uintptr_t k = (uintptr_t)addr;
+	unsigned s = (unsigned)((k >> 2) * 2654435761u) & PGXP_ADDR_MASK;
+	for (int i = 0; i < 16; i++) {
+		const PgxpAddrEntry* e = &s_pgxpAddr[(s + i) & PGXP_ADDR_MASK];
+		if (e->key == k) { *x = e->x; *y = e->y; *w = e->w; return true; }
+		if (e->key == 0) return false;
+	}
+	return false;
+}
+
+/* Parked precise verts for the prim currently being assembled. Filled by
+ * PsyX_SetNextPrimPgxp at emit (before addPrim), copied into the per-prim
+ * table at addPrim. Each entry tagged with its integer screen key so the
+ * draw-time match is winding-independent. */
+struct PgxpVtx { int key; float x, y, w; };
+static PgxpVtx g_primPgxpNext[4];
+static int     g_primPgxpNextCount = 0;
+static int     g_primPgxpNextValid = 0;
+
+extern "C" void PsyX_SetNextPrimPgxp(void* a0, void* a1, void* a2, void* a3)
+{
+	if (!g_PsxUsePgxp) return;
+	void* addrs[4] = { a0, a1, a2, a3 };
+	int n = 0;
+	for (int i = 0; i < 4; i++) {
+		if (!addrs[i]) continue;
+		float x, y, w;
+		if (PGXP_MapGet(addrs[i], &x, &y, &w)) {
+			g_primPgxpNext[n].key = *(int*)addrs[i];
+			g_primPgxpNext[n].x = x; g_primPgxpNext[n].y = y; g_primPgxpNext[n].w = w;
+			n++;
+		}
+	}
+	g_primPgxpNextCount = n;
+	g_primPgxpNextValid = 1;
+}
+
+/* Per-prim parked verts, keyed by the prim (P_TAG) pointer — stable from
+ * addPrim to draw, immune to the scratch buffer being reused by later meshes.
+ * Mirrors g_szTable's lifecycle (cleared each GsDrawOt). */
+struct PgxpPrimEntry { uintptr_t key; int n; PgxpVtx v[4]; };
+#define PGXP_PRIM_BITS 13
+#define PGXP_PRIM_SIZE (1 << PGXP_PRIM_BITS)
+#define PGXP_PRIM_MASK (PGXP_PRIM_SIZE - 1)
+static PgxpPrimEntry g_pgxpPrimTable[PGXP_PRIM_SIZE];
+
+static void PgxpPrimStore(const void* prim)
+{
+	uintptr_t key = (uintptr_t)prim;
+	unsigned s = (unsigned)((key >> 2) * 2654435761u) & PGXP_PRIM_MASK;
+	for (int i = 0; i < 16; i++) {
+		PgxpPrimEntry* e = &g_pgxpPrimTable[(s + i) & PGXP_PRIM_MASK];
+		if (e->key == 0 || e->key == key) {
+			e->key = key; e->n = g_primPgxpNextCount;
+			for (int j = 0; j < g_primPgxpNextCount; j++) e->v[j] = g_primPgxpNext[j];
+			return;
+		}
+	}
+}
+
+/* Current prim's parked set, loaded by PGXP_BeginPrim from the per-prim table
+ * just before its vertices are built. */
+static const PgxpVtx* s_curPgxp = nullptr;
+static int s_curPgxpN = 0;
+
+static void PGXP_BeginPrim(const void* prim)
+{
+	s_curPgxp = nullptr; s_curPgxpN = 0;
+	uintptr_t key = (uintptr_t)prim;
+	unsigned s = (unsigned)((key >> 2) * 2654435761u) & PGXP_PRIM_MASK;
+	for (int i = 0; i < 16; i++) {
+		const PgxpPrimEntry* e = &g_pgxpPrimTable[(s + i) & PGXP_PRIM_MASK];
+		if (e->key == key) { s_curPgxp = e->v; s_curPgxpN = e->n; return; }
+		if (e->key == 0) return;
+	}
+}
+
 static inline void PgxpFillVertex(GrVertex* v, int rawX, int rawY, float ofsX, float ofsY, unsigned short hint)
 {
 	float fx, fy, fw;
+	/* 1) deterministic per-prim parked set (world geometry) — match by key */
+	if (s_curPgxpN)
+	{
+		const int key = (rawX & 0xFFFF) | (rawY << 16);
+		for (int i = 0; i < s_curPgxpN; i++) {
+			if (s_curPgxp[i].key == key) {
+				v->ppx = s_curPgxp[i].x + ofsX;
+				v->ppy = s_curPgxp[i].y + ofsY;
+				v->ppw = s_curPgxp[i].w;
+				s_pgxpHit++;
+				return;
+			}
+		}
+	}
+	/* 2) heuristic (x,y)-key ring (immediate prims, fallback) */
 	if (PGXP_LookupHinted(rawX, rawY, hint, &fx, &fy, &fw))
 	{
 		v->ppx = fx + ofsX;
@@ -201,6 +323,14 @@ extern "C" void PsyX_CaptureGteDepths(void* prim)
 	 * its precise vertices at draw time. Harmless when PGXP off. */
 	PGXP_StampPrim(prim);
 
+	/* PGXP deterministic path: if the emit site resolved this prim's precise
+	 * verts (PsyX_SetNextPrimPgxp), park them per-prim now (stable to draw). */
+	if (g_primPgxpNextValid) {
+		PgxpPrimStore(prim);
+		g_primPgxpNextValid = 0;
+		g_primPgxpNextCount = 0;
+	}
+
 	uintptr_t key = (uintptr_t)prim;
 	int slot = (int)((key >> 2) & SZ_TABLE_MASK);
 
@@ -241,6 +371,11 @@ extern "C" void PsyX_ClearGteDepthTable(void)
 	g_szMaxThisFrame = 0;
 	memset(g_szTable, 0, sizeof(g_szTable));
 	g_primSzNextValid = 0;
+	if (g_PsxUsePgxp) memset(g_pgxpPrimTable, 0, sizeof(g_pgxpPrimTable));
+	g_primPgxpNextValid = 0;
+	g_primPgxpNextCount = 0;
+	s_curPgxp = nullptr;
+	s_curPgxpN = 0;
 }
 
 static bool PsyX_LookupGteDepths(const void* prim, uint16_t* sz)
@@ -1392,6 +1527,7 @@ static int ProcessFlatPoly(P_TAG* polyTag)
 	/* PGXP hint: the prim's stamped GTE ring position (0xFFFF / ignored when
 	 * PGXP off). 3D polygons only — sprites/tiles/lines stay 0xFFFF. */
 	const u_short gteIndex = g_PsxUsePgxp ? polyTag->pgxp_index : (u_short)0xFFFF;
+	if (g_PsxUsePgxp) PGXP_BeginPrim(polyTag);
 
 	const bool shadeTexOn = (polyTag->code & 1) == 0;
 	const bool semiTrans = (polyTag->code & 2);
@@ -1536,6 +1672,7 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 {
 	/* PGXP hint (3D polygons only). 0xFFFF / ignored when PGXP off. */
 	const u_short gteIndex = g_PsxUsePgxp ? polyTag->pgxp_index : (u_short)0xFFFF;
+	if (g_PsxUsePgxp) PGXP_BeginPrim(polyTag);
 
 	const bool shadeTexOn = true;
 	const bool semiTrans = (polyTag->code & 2);

@@ -281,6 +281,21 @@ int Lm_H(long long value, int sf) {
 
 
 
+/* PGXP precise screen-coord FIFO, mirrors the GTE SXY0/SXY1/SXY2 FIFO so the
+ * store macros can resolve a destination address to the precise float coord
+ * the GTE just produced. Updated only when g_PsxUsePgxp. */
+static float s_pgxpFifoX[3], s_pgxpFifoY[3], s_pgxpFifoW[3];
+
+/* Called from the gte_stsxy* store macros (only when g_PsxUsePgxp): the macro
+ * knows it is writing FIFO slot `slot` (SXY0=0, SXY1=1, SXY2=2) to `addr`, so
+ * record addr->precise in PsyX_GPU's address map. */
+extern "C" void PGXP_MapPut(void* addr, float x, float y, float w);
+extern "C" void PGXP_StoreAddr(void* addr, int slot)
+{
+	if ((unsigned)slot > 2u) return;
+	PGXP_MapPut(addr, s_pgxpFifoX[slot], s_pgxpFifoY[slot], s_pgxpFifoW[slot]);
+}
+
 int GTE_RotTransPers(int idx, int lm)
 {
 	int h_over_sz3;
@@ -311,6 +326,14 @@ int GTE_RotTransPers(int idx, int lm)
 		double fx = ((double)C2_OFX + (double)C2_IR1 * (double)h_over_sz3) / 65536.0;
 		double fy = ((double)C2_OFY + (double)C2_IR2 * (double)h_over_sz3) / 65536.0;
 		PGXP_PushVertex((int)C2_SX2, (int)C2_SY2, (float)fx, (float)fy, (float)C2_SZ3);
+
+		/* Mirror the GTE SXY FIFO with a precise FIFO so the gte_stsxy* store
+		 * macros (which know the destination address but not the precise value)
+		 * can record address->precise deterministically. Shift exactly as the
+		 * C2_SXY0=C2_SXY1; C2_SXY1=C2_SXY2 shift above, then set slot 2. */
+		s_pgxpFifoX[0] = s_pgxpFifoX[1]; s_pgxpFifoX[1] = s_pgxpFifoX[2]; s_pgxpFifoX[2] = (float)fx;
+		s_pgxpFifoY[0] = s_pgxpFifoY[1]; s_pgxpFifoY[1] = s_pgxpFifoY[2]; s_pgxpFifoY[2] = (float)fy;
+		s_pgxpFifoW[0] = s_pgxpFifoW[1]; s_pgxpFifoW[1] = s_pgxpFifoW[2]; s_pgxpFifoW[2] = (float)C2_SZ3;
 	}
 
 	return h_over_sz3;

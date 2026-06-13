@@ -214,6 +214,15 @@ extern void PsyX_ClearGteDepthTable(void);
  * system the polygon's true per-vertex GTE SZ values before addPrim, since
  * the GTE SZ FIFO is stale at addPrim time (transforms ran earlier in bulk). */
 extern void PsyX_SetNextPrimSz(unsigned short s0, unsigned short s1, unsigned short s2, unsigned short s3, int arg3);
+/* PGXP deterministic coverage: world-geometry renderers call this right next
+ * to PsyX_SetNextPrimSz, passing the addresses of the scratch screen-coord
+ * entries (screenXy_0[idx]) the next prim's vertices were copied from. PsyX
+ * resolves them to the precise GTE projection recorded at gte_stsxy* time and
+ * parks them per-prim. Pass NULL for an unused 4th vertex (triangles).
+ * No-op when PGXP is off. */
+extern void PsyX_SetNextPrimPgxp(void* a0, void* a1, void* a2, void* a3);
+/* PGXP: record addr->precise from the gte_stsxy* store macros. Internal. */
+extern void PGXP_StoreAddr(void* addr, int slot);
 #ifdef __cplusplus
 }
 #endif
