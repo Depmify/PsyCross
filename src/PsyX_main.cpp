@@ -210,6 +210,12 @@ int intrThreadMain(void* data)
 				}
 			}
 		}
+
+		/* Advance SPU ADSR envelopes on the audio-timing thread, NOT from the
+		 * render thread (PsyX_EndScene) — that placement deadlocked. Takes only
+		 * g_SpuMutex (never nested under g_intrMutex), throttles on the
+		 * SDL_GetTicks ms delta, no-op unless `adsr 1`. */
+		PsyX_SPUAL_Update();
 	}
 
 	return 0;
@@ -909,8 +915,6 @@ void PsyX_EndScene()
 	begin_scene_flag = 0;
 
 	PGXP_CoverageTick();
-
-	PsyX_SPUAL_Update(); // advance SPU ADSR envelopes (per-frame wall-clock dt)
 
 	GR_EndScene();
 

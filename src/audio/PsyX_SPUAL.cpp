@@ -73,6 +73,16 @@ static SDL_mutex* g_SpuMutex = NULL;
 static int g_spuInit = 0;
 static int s_spuMallocVal = 0;
 
+/* SPU ADSR envelope master gate. Default OFF: the envelope path is the same
+ * feature that previously deadlocked when ticked from the render thread, so it
+ * ships disabled (audio byte-identical to known-good) and is opt-in via the
+ * `adsr 1` console command until validated. When OFF, SetKey/SetVoiceAttr/
+ * Update all take their pre-envelope code paths. */
+int g_SpuAdsrEnabled = 0;
+
+void PsyX_SPUAL_SetAdsrEnabled(int on) { g_SpuAdsrEnabled = on ? 1 : 0; }
+int  PsyX_SPUAL_GetAdsrEnabled(void)   { return g_SpuAdsrEnabled; }
+
 typedef enum
 {
 	ENV_OFF = 0,
@@ -720,7 +730,7 @@ static int EnvelopeAdvance(SPUALVoice* voice, int samples)
 
 void PsyX_SPUAL_Update()
 {
-	if (!g_spuInit)
+	if (!g_spuInit || !g_SpuAdsrEnabled)
 		return;
 
 	static u_int s_lastTicks = 0;
@@ -967,7 +977,7 @@ void PsyX_SPUAL_SetKey(int on_off, u_int voice_bit)
 			// a real envelope — those are the ones that otherwise ring forever
 			// (e.g. the clock bell). One-shot SFX/voices end on their own and
 			// keep the plain static-gain path untouched.
-			if (voice->looping && (voice->attr.adsr1 || voice->attr.adsr2))
+			if (g_SpuAdsrEnabled && voice->looping && (voice->attr.adsr1 || voice->attr.adsr2))
 			{
 				voice->hasEnvelope = 1;
 				EnvelopeKeyOn(voice);
@@ -983,7 +993,7 @@ void PsyX_SPUAL_SetKey(int on_off, u_int voice_bit)
 		}
 		else
 		{
-			if (voice->hasEnvelope && voice->envPhase != ENV_OFF)
+			if (g_SpuAdsrEnabled && voice->hasEnvelope && voice->envPhase != ENV_OFF)
 			{
 				// Let the release phase ring out; the tick stops the source
 				// once the envelope reaches zero.

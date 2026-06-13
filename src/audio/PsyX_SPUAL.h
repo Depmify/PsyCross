@@ -27,6 +27,8 @@ extern void PsyX_SPUAL_SetVoiceAttr(SpuVoiceAttr* psxAttrib);
 extern void PsyX_SPUAL_GetVoiceAttr(SpuVoiceAttr* psxAttrib);
 extern void PsyX_SPUAL_SetKey(int on_off, u_int voice_bit);
 extern void PsyX_SPUAL_Update();
+extern void PsyX_SPUAL_SetAdsrEnabled(int on);
+extern int  PsyX_SPUAL_GetAdsrEnabled(void);
 
 extern int PsyX_SPUAL_GetKeyStatus(u_int voice_bit);
 extern void PsyX_SPUAL_GetAllKeysStatus(char* status);
