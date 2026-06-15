@@ -408,6 +408,30 @@ void SetDrawTPage(DR_TPAGE* p, int dfe, int dtd, int tpage)
 	setDrawTPage(p, dfe, dtd, tpage);
 }
 
+/* Must set the prim tag (len=2, code 0xE6) — a no-op leaves an uninitialised
+ * tag, so the DR_STP linked into the OT has a garbage length and the prim
+ * walker crashes (map4_s03 cult-TV cutscene, func_800D8FC0). */
+void SetDrawStp(DR_STP* p, int pbw)
+{
+	setDrawStp(p, pbw);
+}
+
+/* The game links DR_OFFSET prims into the OT to position rendering into the
+ * active double-buffer (bodyprog_8005E0DC, water, several maps). A no-op stub
+ * left an uninitialised tag => garbage length => OT-walk corruption
+ * ([OT-SCAN] 5E89C during the map4_s03 boss). The PSX draw-offset value itself
+ * must NOT be applied on PC — GR positions the framebuffer via the display
+ * env, and applying the raw offset shifts everything off-screen. So emit a
+ * well-formed, render-neutral prim: code[0] sub-type 0 makes ProcessDrawEnv
+ * consume the declared length and advance correctly without touching ofs. */
+void SetDrawOffset(DR_OFFSET* p, u_short* ofs)
+{
+	(void)ofs;
+	p->code[0] = 0;
+	p->code[1] = 0;
+	setlen(p, 2);
+}
+
 u_int DrawSyncCallback(void(*func)(void))
 {
 	drawsync_callback = func;
@@ -802,6 +826,14 @@ void SetPolyFT4(POLY_FT4* p)
 void SetPolyG4(POLY_G4* p)
 {
 	setPolyG4(p);
+}
+
+/* Was a no-op stub — left the POLY_G3 tag uninitialised, so any G3 linked into
+ * an OT (bodyprog_80040B74 semi-transparent effect) had a garbage length and
+ * corrupted the prim walk. Initialise it like the other SetPoly* helpers. */
+void SetPolyG3(POLY_G3* p)
+{
+	setPolyG3(p);
 }
 
 void TermPrim(void* p)
