@@ -245,6 +245,17 @@ static void PGXP_BeginPrim(const void* prim)
 	}
 }
 
+/* A vertex's precise float screen coord is the unrounded version of the integer
+ * coord stored in the same prim field, so they agree to <1px. A larger gap means
+ * we matched the WRONG vertex (an (x,y)-key collision in the parked/ring tiers,
+ * or an off-screen-clamped coord). Reject it: the vertex falls back to affine
+ * (correct geometry, texture swims) instead of warping to a wrong position. */
+static inline bool PgxpAccept(float fx, float fy, int rawX, int rawY)
+{
+	float dx = fx - (float)rawX, dy = fy - (float)rawY;
+	return dx > -2.0f && dx < 2.0f && dy > -2.0f && dy < 2.0f;
+}
+
 /* addr = the vertex's prim-field pointer (MakeVertex has it); rawX/rawY = the
  * integer coord read from that field, used for the parked/ring matches. */
 static inline void PgxpFillVertex(GrVertex* v, const void* addr, int rawX, int rawY, float ofsX, float ofsY, unsigned short hint)
@@ -252,7 +263,7 @@ static inline void PgxpFillVertex(GrVertex* v, const void* addr, int rawX, int r
 	float fx, fy, fw;
 	/* 1) deterministic by prim-field address: direct-to-prim geometry
 	 *    (effect quads via gte_stsxy3_g3, character models via libgs_stub) */
-	if (PGXP_MapGet((void*)addr, &fx, &fy, &fw))
+	if (PGXP_MapGet((void*)addr, &fx, &fy, &fw) && PgxpAccept(fx, fy, rawX, rawY))
 	{
 		v->ppx = fx + ofsX;
 		v->ppy = fy + ofsY;
@@ -266,16 +277,19 @@ static inline void PgxpFillVertex(GrVertex* v, const void* addr, int rawX, int r
 		const int key = (rawX & 0xFFFF) | (rawY << 16);
 		for (int i = 0; i < s_curPgxpN; i++) {
 			if (s_curPgxp[i].key == key) {
-				v->ppx = s_curPgxp[i].x + ofsX;
-				v->ppy = s_curPgxp[i].y + ofsY;
-				v->ppw = s_curPgxp[i].w;
-				s_pgxpDet++;
-				return;
+				if (PgxpAccept(s_curPgxp[i].x, s_curPgxp[i].y, rawX, rawY)) {
+					v->ppx = s_curPgxp[i].x + ofsX;
+					v->ppy = s_curPgxp[i].y + ofsY;
+					v->ppw = s_curPgxp[i].w;
+					s_pgxpDet++;
+					return;
+				}
+				break; /* key matched but coord disagrees -> wrong match, go affine */
 			}
 		}
 	}
 	/* 3) heuristic (x,y)-key ring — immediate prims, fallback */
-	if (PGXP_LookupHinted(rawX, rawY, hint, &fx, &fy, &fw))
+	if (PGXP_LookupHinted(rawX, rawY, hint, &fx, &fy, &fw) && PgxpAccept(fx, fy, rawX, rawY))
 	{
 		v->ppx = fx + ofsX;
 		v->ppy = fy + ofsY;
