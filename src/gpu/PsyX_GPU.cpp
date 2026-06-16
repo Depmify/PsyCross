@@ -105,12 +105,6 @@ static int PGXP_LookupHinted(int sx, int sy, unsigned short hint16, float* ox, f
  * or fall back to affine (miss)? Dumped ~once a second when PGXP is on. Also
  * bumps the address-map generation once per frame (see s_pgxpGen). */
 static unsigned int s_pgxpDet = 0, s_pgxpRingHit = 0, s_pgxpMiss = 0, s_pgxpFrames = 0;
-/* emit-bridge link counters (diagnose det=0): put=MapPut records, setNext=
- * PsyX_SetNextPrimPgxp calls, resolved=verts resolved in those, primStore=
- * per-prim parks, beginHit=PGXP_BeginPrim loaded a set, keyMatch=tier2 key
- * matched, keyRej=tier2 matched-but-rejected-by-PgxpAccept. */
-unsigned int g_pgxpPut=0, g_pgxpSetNext=0, g_pgxpResolved=0, g_pgxpPrimStore=0,
-             g_pgxpBeginHit=0, g_pgxpKeyMatch=0, g_pgxpKeyRej=0;
 extern "C" void PGXP_BumpGen(void);
 extern "C" void PGXP_CoverageTick(void)
 {
@@ -120,16 +114,12 @@ extern "C" void PGXP_CoverageTick(void)
 	{
 		unsigned int tot = s_pgxpDet + s_pgxpRingHit + s_pgxpMiss;
 		if (tot)
-			eprintinfo("[PGXP] cov %uf: det=%u(%.0f%%) ring=%u(%.0f%%) miss=%u(%.0f%%) | put=%u setNext=%u resolved=%u primStore=%u beginHit=%u keyMatch=%u keyRej=%u\n",
+			eprintinfo("[PGXP] cov %uf: det=%u(%.0f%%) ring=%u(%.0f%%) miss=%u(%.0f%%)\n",
 				s_pgxpFrames,
 				s_pgxpDet,     100.0 * (double)s_pgxpDet     / (double)tot,
 				s_pgxpRingHit, 100.0 * (double)s_pgxpRingHit / (double)tot,
-				s_pgxpMiss,    100.0 * (double)s_pgxpMiss    / (double)tot,
-				g_pgxpPut, g_pgxpSetNext, g_pgxpResolved, g_pgxpPrimStore,
-				g_pgxpBeginHit, g_pgxpKeyMatch, g_pgxpKeyRej);
+				s_pgxpMiss,    100.0 * (double)s_pgxpMiss    / (double)tot);
 		s_pgxpDet = s_pgxpRingHit = s_pgxpMiss = s_pgxpFrames = 0;
-		g_pgxpPut = g_pgxpSetNext = g_pgxpResolved = g_pgxpPrimStore =
-			g_pgxpBeginHit = g_pgxpKeyMatch = g_pgxpKeyRej = 0;
 	}
 }
 
@@ -158,10 +148,8 @@ static unsigned s_pgxpGen = 1;   /* bumped once per frame (PGXP_CoverageTick) */
 
 extern "C" void PGXP_BumpGen(void) { s_pgxpGen++; }
 
-extern unsigned int g_pgxpPut, g_pgxpSetNext, g_pgxpResolved, g_pgxpPrimStore, g_pgxpBeginHit, g_pgxpKeyMatch, g_pgxpKeyRej;
 extern "C" void PGXP_MapPut(void* addr, float x, float y, float w)
 {
-	g_pgxpPut++;
 	uintptr_t k = (uintptr_t)addr;
 	unsigned s = (unsigned)((k >> 2) * 2654435761u) & PGXP_ADDR_MASK;
 	for (int i = 0; i < 16; i++) {
@@ -213,13 +201,11 @@ static int     g_primPgxpNextValid = 0;
 extern "C" void PsyX_SetNextPrimPgxp(void* a0, void* a1, void* a2, void* a3)
 {
 	if (!g_PsxUsePgxp) return;
-	g_pgxpSetNext++;
 	void* addrs[4] = { a0, a1, a2, a3 };
 	for (int i = 0; i < 4; i++) {
 		float x, y, w;
 		if (addrs[i] && PGXP_MapGet(addrs[i], &x, &y, &w)) {
 			g_primPgxpNext[i].x = x; g_primPgxpNext[i].y = y; g_primPgxpNext[i].w = w;
-			g_pgxpResolved++;
 		} else {
 			g_primPgxpNext[i].w = -1.0f; /* slot unresolved -> affine */
 		}
@@ -246,7 +232,6 @@ static void PgxpPrimStore(const void* prim)
 	for (int i = 0; i < 16; i++) {
 		PgxpPrimEntry* e = &g_pgxpPrimTable[(s + i) & PGXP_PRIM_MASK];
 		if (e->key == key || e->key == 0 || e->gen != s_pgxpGen) {
-			g_pgxpPrimStore++;
 			e->key = key; e->gen = s_pgxpGen; e->n = g_primPgxpNextCount;
 			for (int j = 0; j < g_primPgxpNextCount; j++) e->v[j] = g_primPgxpNext[j];
 			return;
@@ -265,7 +250,7 @@ static void PGXP_BeginPrim(const void* prim)
 	for (int i = 0; i < 16; i++) {
 		const PgxpPrimEntry* e = &g_pgxpPrimTable[(s + i) & PGXP_PRIM_MASK];
 		if (e->key == key) {
-			if (e->gen == s_pgxpGen) { s_curPgxp = e->v; s_curPgxpN = e->n; g_pgxpBeginHit++; }
+			if (e->gen == s_pgxpGen) { s_curPgxp = e->v; s_curPgxpN = e->n; }
 			return;
 		}
 		if (e->key == 0) return;
@@ -314,7 +299,6 @@ static inline void PgxpFillVertex(GrVertex* v, const void* addr, int rawX, int r
 			if (d < bestD) { bestD = d; best = i; }
 		}
 		if (best >= 0) {
-			g_pgxpKeyMatch++;
 			if (bestD <= 4.0f) {   /* within 2px -> this vertex's own precise */
 				v->ppx = s_curPgxp[best].x + ofsX;
 				v->ppy = s_curPgxp[best].y + ofsY;
@@ -322,7 +306,6 @@ static inline void PgxpFillVertex(GrVertex* v, const void* addr, int rawX, int r
 				s_pgxpDet++;
 				return;
 			}
-			g_pgxpKeyRej++;
 		}
 	}
 	/* 3) heuristic (x,y)-key ring — immediate prims, fallback */
