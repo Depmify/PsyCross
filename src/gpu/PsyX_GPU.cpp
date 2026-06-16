@@ -105,6 +105,12 @@ static int PGXP_LookupHinted(int sx, int sy, unsigned short hint16, float* ox, f
  * or fall back to affine (miss)? Dumped ~once a second when PGXP is on. Also
  * bumps the address-map generation once per frame (see s_pgxpGen). */
 static unsigned int s_pgxpDet = 0, s_pgxpRingHit = 0, s_pgxpMiss = 0, s_pgxpFrames = 0;
+/* emit-bridge link counters (diagnose det=0): put=MapPut records, setNext=
+ * PsyX_SetNextPrimPgxp calls, resolved=verts resolved in those, primStore=
+ * per-prim parks, beginHit=PGXP_BeginPrim loaded a set, keyMatch=tier2 key
+ * matched, keyRej=tier2 matched-but-rejected-by-PgxpAccept. */
+unsigned int g_pgxpPut=0, g_pgxpSetNext=0, g_pgxpResolved=0, g_pgxpPrimStore=0,
+             g_pgxpBeginHit=0, g_pgxpKeyMatch=0, g_pgxpKeyRej=0;
 extern "C" void PGXP_BumpGen(void);
 extern "C" void PGXP_CoverageTick(void)
 {
@@ -114,12 +120,16 @@ extern "C" void PGXP_CoverageTick(void)
 	{
 		unsigned int tot = s_pgxpDet + s_pgxpRingHit + s_pgxpMiss;
 		if (tot)
-			eprintinfo("[PGXP] coverage over %u frames: det=%u (%.1f%%) ring=%u (%.1f%%) miss=%u (%.1f%%)\n",
+			eprintinfo("[PGXP] cov %uf: det=%u(%.0f%%) ring=%u(%.0f%%) miss=%u(%.0f%%) | put=%u setNext=%u resolved=%u primStore=%u beginHit=%u keyMatch=%u keyRej=%u\n",
 				s_pgxpFrames,
 				s_pgxpDet,     100.0 * (double)s_pgxpDet     / (double)tot,
 				s_pgxpRingHit, 100.0 * (double)s_pgxpRingHit / (double)tot,
-				s_pgxpMiss,    100.0 * (double)s_pgxpMiss    / (double)tot);
+				s_pgxpMiss,    100.0 * (double)s_pgxpMiss    / (double)tot,
+				g_pgxpPut, g_pgxpSetNext, g_pgxpResolved, g_pgxpPrimStore,
+				g_pgxpBeginHit, g_pgxpKeyMatch, g_pgxpKeyRej);
 		s_pgxpDet = s_pgxpRingHit = s_pgxpMiss = s_pgxpFrames = 0;
+		g_pgxpPut = g_pgxpSetNext = g_pgxpResolved = g_pgxpPrimStore =
+			g_pgxpBeginHit = g_pgxpKeyMatch = g_pgxpKeyRej = 0;
 	}
 }
 
@@ -148,8 +158,10 @@ static unsigned s_pgxpGen = 1;   /* bumped once per frame (PGXP_CoverageTick) */
 
 extern "C" void PGXP_BumpGen(void) { s_pgxpGen++; }
 
+extern unsigned int g_pgxpPut, g_pgxpSetNext, g_pgxpResolved, g_pgxpPrimStore, g_pgxpBeginHit, g_pgxpKeyMatch, g_pgxpKeyRej;
 extern "C" void PGXP_MapPut(void* addr, float x, float y, float w)
 {
+	g_pgxpPut++;
 	uintptr_t k = (uintptr_t)addr;
 	unsigned s = (unsigned)((k >> 2) * 2654435761u) & PGXP_ADDR_MASK;
 	for (int i = 0; i < 16; i++) {
@@ -184,10 +196,16 @@ static bool PGXP_MapGet(void* addr, float* x, float* y, float* w)
  * each prim used via PsyX_SetNextPrimPgxp (called from its gated SH_PC_PORT emit
  * site just before addPrim); we resolve those scratch addresses to precise
  * coords, park them, store per-prim by P_TAG pointer at addPrim, and load them
- * at draw (PGXP_BeginPrim). Each parked vert carries its integer screen key so
- * the draw-time match is winding-independent. This is what keeps world floors
- * perspective-correct. */
-struct PgxpVtx { int key; float x, y, w; };
+ * at draw (PGXP_BeginPrim).
+ *
+ * The drawer copies scratch[field_10..13] into poly->x0..x3 IN ORDER, and passes
+ * those same four addresses here in the same order, so parked slot i is exactly
+ * the precise coord for drawn vertex i. We match BY SLOT (not by integer screen
+ * key): keying by (x,y) picks a wrong-but-near vertex (sub-2px) that varies per
+ * frame, which on segmented character meshes pulls the segments apart (seams)
+ * and wobbles in motion. Slot-matching is exact and frame-stable. w < 0 marks a
+ * slot whose scratch address didn't resolve. */
+struct PgxpVtx { float x, y, w; };
 static PgxpVtx g_primPgxpNext[4];
 static int     g_primPgxpNextCount = 0;
 static int     g_primPgxpNextValid = 0;
@@ -195,22 +213,27 @@ static int     g_primPgxpNextValid = 0;
 extern "C" void PsyX_SetNextPrimPgxp(void* a0, void* a1, void* a2, void* a3)
 {
 	if (!g_PsxUsePgxp) return;
+	g_pgxpSetNext++;
 	void* addrs[4] = { a0, a1, a2, a3 };
-	int n = 0;
 	for (int i = 0; i < 4; i++) {
-		if (!addrs[i]) continue;
 		float x, y, w;
-		if (PGXP_MapGet(addrs[i], &x, &y, &w)) {
-			g_primPgxpNext[n].key = *(int*)addrs[i];
-			g_primPgxpNext[n].x = x; g_primPgxpNext[n].y = y; g_primPgxpNext[n].w = w;
-			n++;
+		if (addrs[i] && PGXP_MapGet(addrs[i], &x, &y, &w)) {
+			g_primPgxpNext[i].x = x; g_primPgxpNext[i].y = y; g_primPgxpNext[i].w = w;
+			g_pgxpResolved++;
+		} else {
+			g_primPgxpNext[i].w = -1.0f; /* slot unresolved -> affine */
 		}
 	}
-	g_primPgxpNextCount = n;
+	g_primPgxpNextCount = 4;
 	g_primPgxpNextValid = 1;
 }
 
-struct PgxpPrimEntry { uintptr_t key; int n; PgxpVtx v[4]; };
+/* gen-stamped (like the address map): GsDrawOt clears this table at the START of
+ * the draw — AFTER addPrim stored into it but BEFORE DrawOTag reads it — so a
+ * plain memset wipes the data before use. Stamping each entry with the frame
+ * generation lets the parked set survive that mistimed clear: store and draw
+ * happen in the same frame (same gen), and next frame's entries are rejected. */
+struct PgxpPrimEntry { uintptr_t key; unsigned gen; int n; PgxpVtx v[4]; };
 #define PGXP_PRIM_BITS 13
 #define PGXP_PRIM_SIZE (1 << PGXP_PRIM_BITS)
 #define PGXP_PRIM_MASK (PGXP_PRIM_SIZE - 1)
@@ -222,8 +245,9 @@ static void PgxpPrimStore(const void* prim)
 	unsigned s = (unsigned)((key >> 2) * 2654435761u) & PGXP_PRIM_MASK;
 	for (int i = 0; i < 16; i++) {
 		PgxpPrimEntry* e = &g_pgxpPrimTable[(s + i) & PGXP_PRIM_MASK];
-		if (e->key == 0 || e->key == key) {
-			e->key = key; e->n = g_primPgxpNextCount;
+		if (e->key == key || e->key == 0 || e->gen != s_pgxpGen) {
+			g_pgxpPrimStore++;
+			e->key = key; e->gen = s_pgxpGen; e->n = g_primPgxpNextCount;
 			for (int j = 0; j < g_primPgxpNextCount; j++) e->v[j] = g_primPgxpNext[j];
 			return;
 		}
@@ -240,7 +264,10 @@ static void PGXP_BeginPrim(const void* prim)
 	unsigned s = (unsigned)((key >> 2) * 2654435761u) & PGXP_PRIM_MASK;
 	for (int i = 0; i < 16; i++) {
 		const PgxpPrimEntry* e = &g_pgxpPrimTable[(s + i) & PGXP_PRIM_MASK];
-		if (e->key == key) { s_curPgxp = e->v; s_curPgxpN = e->n; return; }
+		if (e->key == key) {
+			if (e->gen == s_pgxpGen) { s_curPgxp = e->v; s_curPgxpN = e->n; g_pgxpBeginHit++; }
+			return;
+		}
 		if (e->key == 0) return;
 	}
 }
@@ -271,21 +298,31 @@ static inline void PgxpFillVertex(GrVertex* v, const void* addr, int rawX, int r
 		s_pgxpDet++;
 		return;
 	}
-	/* 2) deterministic per-prim parked set: scratch-copied world geometry */
+	/* 2) deterministic per-prim parked set (scratch-copied world + characters):
+	 *    the parked verts are this prim's own, so the drawn vertex's precise coord
+	 *    is the parked entry CLOSEST to its integer (x,y). Order-independent (the
+	 *    emit sites pass verts in varying orders) and collision-resistant (picks
+	 *    the right vertex when two share a pixel instead of the first key hit —
+	 *    that mismatch is what seamed/wobbled dense character meshes). */
 	if (s_curPgxpN)
 	{
-		const int key = (rawX & 0xFFFF) | (rawY << 16);
+		int best = -1; float bestD = 1e30f;
 		for (int i = 0; i < s_curPgxpN; i++) {
-			if (s_curPgxp[i].key == key) {
-				if (PgxpAccept(s_curPgxp[i].x, s_curPgxp[i].y, rawX, rawY)) {
-					v->ppx = s_curPgxp[i].x + ofsX;
-					v->ppy = s_curPgxp[i].y + ofsY;
-					v->ppw = s_curPgxp[i].w;
-					s_pgxpDet++;
-					return;
-				}
-				break; /* key matched but coord disagrees -> wrong match, go affine */
+			if (s_curPgxp[i].w < 0.0f) continue;       /* unresolved slot */
+			float dx = s_curPgxp[i].x - (float)rawX, dy = s_curPgxp[i].y - (float)rawY;
+			float d = dx * dx + dy * dy;
+			if (d < bestD) { bestD = d; best = i; }
+		}
+		if (best >= 0) {
+			g_pgxpKeyMatch++;
+			if (bestD <= 4.0f) {   /* within 2px -> this vertex's own precise */
+				v->ppx = s_curPgxp[best].x + ofsX;
+				v->ppy = s_curPgxp[best].y + ofsY;
+				v->ppw = s_curPgxp[best].w;
+				s_pgxpDet++;
+				return;
 			}
+			g_pgxpKeyRej++;
 		}
 	}
 	/* 3) heuristic (x,y)-key ring — immediate prims, fallback */
@@ -372,11 +409,15 @@ extern "C" void PsyX_CaptureGteDepths(void* prim)
 	PGXP_StampPrim(prim);
 
 	/* PGXP scratch-geometry path: if the emit site resolved this prim's precise
-	 * verts (PsyX_SetNextPrimPgxp), park them per-prim now (stable to draw). */
+	 * verts (PsyX_SetNextPrimPgxp), park them per-prim now (stable to draw).
+	 * The valid flag is NOT cleared here: one emit-bridge call feeds SEVERAL
+	 * addPrims sharing the same vertices (the fog base poly + fog overlay poly +
+	 * state packets). Clearing after the first left the overlay poly on the
+	 * collision ring, mismatching the base layer (character seams). It's
+	 * overwritten by the next PsyX_SetNextPrimPgxp; unrelated later prims get
+	 * rejected by the per-vertex distance guard. */
 	if (g_primPgxpNextValid) {
 		PgxpPrimStore(prim);
-		g_primPgxpNextValid = 0;
-		g_primPgxpNextCount = 0;
 	}
 
 	uintptr_t key = (uintptr_t)prim;
@@ -419,7 +460,9 @@ extern "C" void PsyX_ClearGteDepthTable(void)
 	g_szMaxThisFrame = 0;
 	memset(g_szTable, 0, sizeof(g_szTable));
 	g_primSzNextValid = 0;
-	if (g_PsxUsePgxp) memset(g_pgxpPrimTable, 0, sizeof(g_pgxpPrimTable));
+	/* g_pgxpPrimTable is gen-stamped, NOT cleared here: this runs at the start of
+	 * GsDrawOt, after addPrim filled it but before DrawOTag reads it, so a memset
+	 * would wipe the current frame's parked verts before use. */
 	g_primPgxpNextValid = 0;
 	g_primPgxpNextCount = 0;
 	s_curPgxp = nullptr;
