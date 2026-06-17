@@ -408,6 +408,13 @@ void PsyX_GetWindowName(char* buffer)
 
 FILE* g_logStream = NULL;
 
+/* Set by PsyX_Exit() (the normal close path: SDL_QUIT / window-close / Alt+F4).
+ * A benign C++ exception escapes during exit()/static-destruction teardown on
+ * every normal close (the thrower is not yet isolated), tripping std::terminate
+ * AFTER a fully clean shutdown. When this flag is set the terminate handler
+ * treats it as the normal exit it is — no misleading FATAL line, clean exit. */
+static volatile int g_psyxNormalExit = 0;
+
 /* When the host app routes PsyX logging into its own stream (or NULL to
  * silence it), PsyX must not fopen its own "<app>.log" and must never
  * fclose the host's handle at shutdown — doing so left the host's stdio
@@ -659,13 +666,22 @@ void PsyX_Log_Success(const char* fmt, ...)
 
 static void sh_terminate_handler()
 {
-	fprintf(stderr, "[PsyX] FATAL: std::terminate() called!\n");
-	fflush(stderr);
 	/* abort() skips atexit/stdio teardown, so the host's buffered log
 	 * (up to 64KB of tail) would be silently lost on every terminate.
 	 * Flush it here so the log survives. */
 	if (g_logStream)
 		fflush(g_logStream);
+
+	if (g_psyxNormalExit)
+	{
+		/* Normal close already shut everything down cleanly; the terminate is
+		 * the benign teardown exception, not a crash. Exit clean, no FATAL
+		 * spam. _Exit avoids re-entering the atexit chain we're already in. */
+		_Exit(0);
+	}
+
+	fprintf(stderr, "[PsyX] FATAL: std::terminate() called!\n");
+	fflush(stderr);
 	abort();
 }
 
@@ -1109,6 +1125,7 @@ void PsyX_WaitForTimestep(int count)
 
 void PsyX_Exit()
 {
+	g_psyxNormalExit = 1;
 	fprintf(stderr, "[PsyX] PsyX_Exit() called — normal game exit.\n");
 	fflush(stderr);
 	exit(0);
