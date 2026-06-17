@@ -577,16 +577,26 @@ static void UpdateVoiceSample(SPUALVoice* voice)
 		// On PC, we pre-decode the whole sample, so loop_addr is stale
 		// from previous voice assignments. The original adjustment
 		// (loopStart += loop_addr - addr) can produce plausible-but-wrong
-		// loop points when a voice channel is reused with a different sample,
-		// causing short garbage loops. Whole-buffer looping is correct for
-		// pre-decoded ADPCM and matches the de-facto working behavior
-		// (the old bounds check almost always failed anyway).
+		// loop points when a voice channel is reused with a different sample.
+		//
+		// Honor the PSX loop region [loopStart, loopStart+loopLen] instead of
+		// looping the whole buffer. Many one-shot SFX (e.g. cutscene grunts,
+		// the boss shove) carry a tiny sustain-tail loop region at the end;
+		// whole-buffer looping made the ENTIRE sound repeat forever, which is
+		// audibly wrong. AL_LOOP_POINTS_SOFT loops only the tail, matching SPU
+		// hardware. Genuine full-sample loops (loopStart=0) are unchanged.
+		if (loopStart >= 0 && loopStart < count)
+		{
+			ALint loopEnd = loopStart + loopLen;
+			if (loopEnd > count) loopEnd = count;
+			ALint loopPoints[2] = { loopStart, loopEnd };
+			alGetError();
+			alBufferiv(alBuffer, AL_LOOP_POINTS_SOFT, loopPoints);
+		}
 		alSourcei(alSource, AL_LOOPING, AL_TRUE);
 		voice->looping = 1;
-		// Diag: a Repeat=1 ADPCM sample loops forever until a key-off. Name the
-		// voice + sample addr so a never-stopped cutscene loop can be identified.
-		eprintf("[SPULOOP] key-on voice=%d addr=0x%x loopLen=%d (AL_LOOPING)\n",
-			(int)(voice - g_SpuVoices), (unsigned)voice->attr.addr, loopLen);
+		eprintf("[SPULOOP] key-on voice=%d addr=0x%x loopStart=%d loopLen=%d count=%d\n",
+			(int)(voice - g_SpuVoices), (unsigned)voice->attr.addr, loopStart, loopLen, count);
 	}
 	else
 	{

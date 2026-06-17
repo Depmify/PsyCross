@@ -73,6 +73,22 @@ int DrawSync(int mode)
 
 int LoadImage(RECT16* rect, u_long* p)
 {
+	// Blue-blood probe: BLD.TIM's red palette lives at VRAM CLUT (304,0 16x16)
+	// and its pixels at (704,0 64x256). Blood renders with clutY=0 (verified
+	// correct) yet shows blue, so something uploads over that VRAM. Log any
+	// LoadImage overlapping either region so the stomping texture is named;
+	// the upload that lands there right before blood goes blue is the culprit.
+	{
+		int x0 = rect->x, x1 = rect->x + rect->w;
+		int y0 = rect->y, y1 = rect->y + rect->h;
+		int hitClut = (x0 < 320 && x1 > 304 && y0 < 16  && y1 > 0);
+		int hitTex  = (x0 < 768 && x1 > 704 && y0 < 256 && y1 > 0);
+		if (hitClut || hitTex)
+			eprintf("[BLOOD-VRAM] LoadImage rect=(%d,%d %dx%d) -> %s%s\n",
+				rect->x, rect->y, rect->w, rect->h,
+				hitClut ? "CLUT(304,0) " : "", hitTex ? "TEX(704,0)" : "");
+	}
+
 	GR_CopyVRAM((unsigned short*)p, 0, 0, rect->w, rect->h, rect->x, rect->y);
 	return 0;
 }
