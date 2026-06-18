@@ -185,7 +185,13 @@ extern	int (*GPU_printf)(const char *fmt, ...);
 #define isendprim(p) 		((((P_TAG *)(p))->addr) == (uintptr_t)&prim_terminator)
 #define nextPrim(p)  		(void *)(((P_TAG *)(p))->addr)
 
-#define setaddr(p, _addr)	(((P_TAG *)(p))->addr = (uintptr_t)((u_int*)_addr))
+/* _addr MUST be parenthesized: addPrim(ot, *poly + 2) passes a pointer-arith
+ * expression, and without the parens `(u_int*)_addr` parses as
+ * `((u_int*)*poly) + 2` (a u_int*-stride add = +8 bytes) instead of poly[2].
+ * That silently broke EVERY multi-prim emit (blood spray/cloud, muzzle flash)
+ * on PC — bare `*poly` was immune, which is why single-poly was the only
+ * "safe" pattern. The PSX macro `(u_long)(_addr)` always had the parens. */
+#define setaddr(p, _addr)	(((P_TAG *)(p))->addr = (uintptr_t)((u_int*)(_addr)))
 #define getaddr(p)   		(uintptr_t)(((P_TAG *)(p))->addr)
 
 #else
@@ -193,7 +199,7 @@ extern	int (*GPU_printf)(const char *fmt, ...);
 #define isendprim(p) 		((((P_TAG *)(p))->addr)==0xffffff)
 #define nextPrim(p)  		(void *)((((P_TAG *)(p))->addr))
 
-#define setaddr(p, _addr)	(((P_TAG *)(p))->addr = (u_int)((u_int*)_addr))
+#define setaddr(p, _addr)	(((P_TAG *)(p))->addr = (u_int)((u_int*)(_addr)))
 #define getaddr(p)   		(u_int)(((P_TAG *)(p))->addr)
 
 #endif
