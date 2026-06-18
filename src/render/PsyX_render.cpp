@@ -1748,15 +1748,8 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 			// below (search "Pillarbox viewport"); ortho here is matched to
 			// whatever viewport that branch picks.
 			const float psxW = (float)activeDispEnv.disp.w;  // 320
-			const float psxH = (float)activeDispEnv.disp.h;  // 224 (NTSC progressive)
-			/* PSX displays its 320x224 framebuffer at a 4:3 PICTURE aspect — the
-			 * pixels are non-square (taller than wide), NOT the framebuffer's own
-			 * 320/224=1.43. Use the DISPLAY aspect here so the Hor+ widening below
-			 * reveals extra horizontal FOV at PSX-faithful proportions instead of
-			 * stretching everything ~7% too wide (the Harry-too-wide report).
-			 * Matches the viewport block below, which already uses 4:3. The ortho
-			 * still spans the real psxW x psxH; only the scale factor changes. */
-			const float psxAspect = 4.0f / 3.0f;
+			const float psxH = (float)activeDispEnv.disp.h;  // 240
+			const float psxAspect = psxW / psxH;             // 4/3
 			const float winAspect = (g_windowHeight > 0)
 				? ((float)g_windowWidth / (float)g_windowHeight)
 				: psxAspect;
@@ -1765,11 +1758,10 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 				/* 2D UI or non-widescreen window: 4:3 ortho, full viewport. */
 				GR_Ortho2D(0.0f, psxW, psxH, 0.0f, -1.0f, 1.0f);
 			} else if (g_PcWidescreenMode == 1) {
-				/* Hor+ widescreen: widen ortho horizontally, full-window viewport.
-				 * The 4:3 psxAspect already carries the pixel-aspect correction, so
-				 * no separate PAR factor here — the vertical stays at psxH so the
-				 * widened content keeps PSX vertical proportions. */
-				const float margin = psxW * (horScale - 1.0f) * 0.5f;
+				/* Hor+ widescreen: widen ortho, full-window viewport. PSX_NTSC_PIXEL_ASPECT
+				 * preserves 1 H px = 1 V px scaling for character proportions. */
+				const float effectiveScale = horScale * PSX_NTSC_PIXEL_ASPECT;
+				const float margin = psxW * (effectiveScale - 1.0f) * 0.5f;
 				GR_Ortho2D(-margin, psxW + margin, psxH, 0, -1.0f, 1.0f);
 			} else {
 				/* Pillarbox (mode 0, default) or stretch (mode 2): 4:3 ortho.
@@ -1800,7 +1792,7 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 					dbgVpX = (g_windowWidth - dbgVpW) / 2;
 				}
 				const float dbgMargin = (g_PcHorPlusEnabled && horScale > 1.0f && g_PcWidescreenMode == 1)
-					? psxW * (horScale - 1.0f) * 0.5f : 0.0f;
+					? psxW * (horScale * PSX_NTSC_PIXEL_ASPECT - 1.0f) * 0.5f : 0.0f;
 				unsigned key = ((unsigned)(activeDispEnv.disp.w & 0x3FF) << 22) ^
 					((unsigned)(activeDispEnv.disp.h & 0x3FF) << 12) ^
 					((unsigned)(g_windowWidth & 0xFFF)) ^
