@@ -1767,6 +1767,22 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 				 * The viewport (below) handles pillarbox vs full-window. */
 				GR_Ortho2D(0.0f, psxW, psxH, 0.0f, -1.0f, 1.0f);
 			}
+
+			/* [ASPECT] one-time ground-truth dump of the ACTUAL runtime
+			 * projection inputs, so the on-screen aspect can be computed from
+			 * real values instead of my assumptions. */
+			{
+				extern FILE* g_logStream;
+				static int s_aspectLogged = 0;
+				if (!s_aspectLogged && g_PcHorPlusEnabled) {
+					s_aspectLogged = 1;
+					fprintf(stderr, "[ASPECT] disp=%dx%d win=%dx%d psxAspect=%.4f winAspect=%.4f horScale=%.4f HorPlus=%d WS=%d PAR=%.4f\n",
+						(int)activeDispEnv.disp.w, (int)activeDispEnv.disp.h,
+						g_windowWidth, g_windowHeight, psxAspect, winAspect, horScale,
+						g_PcHorPlusEnabled, g_PcWidescreenMode, (float)PSX_NTSC_PIXEL_ASPECT);
+					if (g_logStream) fflush(g_logStream);
+				}
+			}
 		}
 
 		/* Display viewport — set EVERY call, not just on offscreen-state
