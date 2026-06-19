@@ -71,17 +71,18 @@ extern int							g_cfg_pgxpTextureCorrection;
  * the 2D-ortho (affine PSX-look) branch. */
 extern int							g_PsxUsePgxp;
 
-/* PC port: PGXP vertex push. Called from the GTE per projected vertex (only
- * when g_PsxUsePgxp) with the integer screen X/Y (cache key) and the
- * full-precision float screen X/Y + a per-vertex W (~view depth). The GPU
- * prim emitters match each prim vertex back to this by its integer X/Y.
- * Entirely inside PsyCross; no effect when PGXP is off. */
+/* PC port: PGXP shadow-memory model (DuckStation-faithful). The GTE records the
+ * precise projection of each stored vertex word keyed by its native address
+ * (Shadow_Store, via the gte_stsxy* macros); drawers propagate that shadow when
+ * they copy a vertex word into a prim field (Shadow_Copy); the GPU resolves each
+ * prim vertex by address at draw. Entirely inside PsyCross; no effect when off. */
 #if defined(__cplusplus)
 extern "C" {
 #endif
-void PGXP_PushVertex(int sx, int sy, float fx, float fy, float fw);
+void Shadow_Store(void* addr, float x, float y, float w, unsigned value);
+void Shadow_Copy(void* dst, const void* src);
 void PGXP_FrameReset(void);
-void PGXP_CoverageTick(void); /* per-frame; dumps [PGXP] hit/miss when on */
+void PGXP_CoverageTick(void); /* per-frame; dumps [PGXP] det/miss when on */
 float PGXP_GetSzMax(void);    /* prev-frame max SZ for shader depth normalize */
 #if defined(__cplusplus)
 }

@@ -287,13 +287,14 @@ int Lm_H(long long value, int sf) {
 static float s_pgxpFifoX[3], s_pgxpFifoY[3], s_pgxpFifoW[3];
 
 /* Called from the gte_stsxy* store macros (only when g_PsxUsePgxp): the macro
- * knows it is writing FIFO slot `slot` (SXY0=0, SXY1=1, SXY2=2) to `addr`, so
- * record addr->precise in PsyX_GPU's address map. */
-extern "C" void PGXP_MapPut(void* addr, float x, float y, float w);
+ * just wrote the integer screen coord for FIFO slot `slot` (SXY0=0, SXY1=1,
+ * SXY2=2) to `addr`, so record the shadow keyed by that address, validated by
+ * the integer value the macro left there (DuckStation's SWC2 hook). */
+extern "C" void Shadow_Store(void* addr, float x, float y, float w, unsigned value);
 extern "C" void PGXP_StoreAddr(void* addr, int slot)
 {
 	if ((unsigned)slot > 2u) return;
-	PGXP_MapPut(addr, s_pgxpFifoX[slot], s_pgxpFifoY[slot], s_pgxpFifoW[slot]);
+	Shadow_Store(addr, s_pgxpFifoX[slot], s_pgxpFifoY[slot], s_pgxpFifoW[slot], *(unsigned*)addr);
 }
 
 int GTE_RotTransPers(int idx, int lm)
@@ -325,7 +326,6 @@ int GTE_RotTransPers(int idx, int lm)
 	{
 		double fx = ((double)C2_OFX + (double)C2_IR1 * (double)h_over_sz3) / 65536.0;
 		double fy = ((double)C2_OFY + (double)C2_IR2 * (double)h_over_sz3) / 65536.0;
-		PGXP_PushVertex((int)C2_SX2, (int)C2_SY2, (float)fx, (float)fy, (float)C2_SZ3);
 
 		/* Mirror the GTE SXY FIFO with a precise FIFO so the gte_stsxy* store
 		 * macros (which know the destination address but not the precise value)

@@ -26,466 +26,204 @@ int g_currentOTBucketCount = 0;
 float g_otBucketDepth = 0.0f;
 
 /* ----------------------------------------------------------------------------
- * PGXP (perspective-correct rendering) — self-contained, runtime-gated.
+ * PGXP (perspective-correct rendering) — shadow-memory model, DuckStation-faithful.
  *
- * The GTE pushes each projected vertex here (only when g_PsxUsePgxp): its
- * integer screen X/Y (the match key) plus full-precision float screen X/Y and
- * a per-vertex W (~view depth). When the GPU builds a prim's GrVertices it
- * matches each vertex back to its precise data by the integer X/Y key
- * (searching recent ring entries, newest first). On a miss or when PGXP is
- * off, the vertex falls back to the affine values and the shader's
- * u_pgxpEnabled gate keeps it on the legacy path — so nothing changes when off.
- * No prim fields, addPrim, or game-side store macros are touched.
+ * One shadow table parallels PSX memory: each entry is keyed by the NATIVE
+ * ADDRESS of a vertex word (the packed s16 x | s16 y<<16 the GPU reads) and
+ * holds the precise float screen X/Y + view W the GTE produced for that word,
+ * the integer `value` it shadows (validation, never the key) and the frame
+ * generation. Coverage is built by propagation along the data path, never by
+ * heuristics:
+ *   - GTE store (gte_stsxy*)               -> Shadow_Store(destAddr, fx,fy,w, value)
+ *   - drawer copy (poly->xN = screenXy[f]) -> Shadow_Copy(&poly->xN, &screenXy[f])
+ *   - GPU draw   (MakeVertex)              -> GetPreciseVertex(primFieldAddr, value, ...)
+ * A vertex is either propagated (precise) or absent (clean affine, ppw=0). No
+ * ring, no parked set, no nearest-match, no weld — those collide and oscillate.
+ * Seams vanish for free: both bone-joint verts are tracked end-to-end and project
+ * to the same precise value, so they coincide. All work is gated by g_PsxUsePgxp;
+ * the off path is byte-identical to the legacy affine path.
  * -------------------------------------------------------------------------- */
-/* Ring large enough to hold a whole frame's transformed vertices (SH peaks
- * ~150k vertex-transforms/frame): the GTE fills it while the game builds the
- * ordering table, but GsDrawOt/MakeVertex* read it much LATER, so a prim's
- * vertices must still be present at draw time. 262144 (>> 2 == 65536) so the
- * ring position fits the prim's 16-bit pgxp_index when stored as (pos >> 2). */
-#define PGXP_RING_SIZE   262144
-#define PGXP_RING_MASK   (PGXP_RING_SIZE - 1)
-#define PGXP_SEARCH_FWD  6             /* tolerate >>2 hint rounding */
-#define PGXP_SEARCH_BACK 40            /* prim verts sit just before the hint */
 
-struct PgxpRingEntry { int key; float x, y, w; };
-static PgxpRingEntry s_pgxpRing[PGXP_RING_SIZE];
-static unsigned int  s_pgxpRingPos = 0;
+/* Frame generation: bumped once per frame (PGXP_CoverageTick) so a shadow entry
+ * left at a packet address reused by a later frame is rejected on lookup. */
+static unsigned s_pgxpGen = 1;
+extern "C" void PGXP_BumpGen(void) { s_pgxpGen++; }
 
-extern "C" void PGXP_FrameReset(void) { /* monotonic ring; reset not required */ }
+/* Shadow entry: precise projection of the word at `key`. value = the packed
+ * integer (s16 x | s16 y<<16) that lives at key; a draw that reused the address
+ * with a different value falls to affine. */
+struct ShadowEntry { uintptr_t key; unsigned gen; unsigned value; float x, y, w; };
+/* Must hold every projected vertex word AND every copied prim-field word for one
+ * frame (~230k verts -> up to ~1M words). 2^21 open-addressed, 16-probe. */
+#define SHADOW_BITS 21
+#define SHADOW_SIZE (1u << SHADOW_BITS)
+#define SHADOW_MASK (SHADOW_SIZE - 1u)
+static ShadowEntry s_shadow[SHADOW_SIZE];
 
-extern "C" void PGXP_PushVertex(int sx, int sy, float fx, float fy, float fw)
-{
-	PgxpRingEntry* e = &s_pgxpRing[s_pgxpRingPos & PGXP_RING_MASK];
-	e->key = (sx & 0xFFFF) | (sy << 16);
-	e->x = fx; e->y = fy; e->w = fw;
-	s_pgxpRingPos++;
+static inline unsigned ShadowHash(uintptr_t k) {
+	return (unsigned)((k >> 2) * 2654435761u) & SHADOW_MASK;
 }
 
-/* Stamp the prim with the ring position at addPrim time (>> 2 to fit 16 bits;
- * the search window absorbs the rounding). Called from PsyX_CaptureGteDepths
- * for EVERY prim — harmless when PGXP off (s_pgxpRingPos is frozen, the value
- * is never read). prim points at a P_TAG. */
-extern "C" void PGXP_StampPrim(void* prim)
-{
-	((P_TAG*)prim)->pgxp_index = (unsigned short)((s_pgxpRingPos >> 2) & 0xFFFF);
-}
-
-/* Search the ring for the precise vertex matching integer (sx,sy), starting
- * from the prim's stamped hint (its vertices were pushed just before it).
- * hint16 == 0xFFFF => no hint (2D prim) => skip. */
-static int PGXP_LookupHinted(int sx, int sy, unsigned short hint16, float* ox, float* oy, float* ow)
-{
-	if (hint16 == 0xFFFF)
-		return 0;
-	const int key = (sx & 0xFFFF) | (sy << 16);
-	const unsigned int start = (((unsigned int)hint16) << 2);
-	/* Backward-first: this prim's vertices were pushed in the few slots just
-	 * before its stamped hint, so prefer those over a later prim that happens
-	 * to share an integer screen coord. The small forward margin covers the
-	 * >>2 rounding in the stamped hint. */
-	for (int i = 0; i <= PGXP_SEARCH_BACK; i++)
-	{
-		const PgxpRingEntry* e = &s_pgxpRing[(start - i) & PGXP_RING_MASK];
-		if (e->key == key) { *ox = e->x; *oy = e->y; *ow = e->w; return 1; }
+static void Shadow_Put(void* addr, float x, float y, float w, unsigned value) {
+	uintptr_t k = (uintptr_t)addr;
+	unsigned s = ShadowHash(k);
+	for (int i = 0; i < 16; i++) {
+		ShadowEntry* e = &s_shadow[(s + i) & SHADOW_MASK];
+		if (e->key == k || e->key == 0 || e->gen != s_pgxpGen) {
+			e->key = k; e->gen = s_pgxpGen; e->value = value;
+			e->x = x; e->y = y; e->w = w; return;
+		}
 	}
-	for (int i = 1; i <= PGXP_SEARCH_FWD; i++)
-	{
-		const PgxpRingEntry* e = &s_pgxpRing[(start + i) & PGXP_RING_MASK];
-		if (e->key == key) { *ox = e->x; *oy = e->y; *ow = e->w; return 1; }
-	}
-	return 0;
+	ShadowEntry* e = &s_shadow[s];   /* probe exhausted: overwrite base */
+	e->key = k; e->gen = s_pgxpGen; e->value = value;
+	e->x = x; e->y = y; e->w = w;
 }
 
-/* Fill a GrVertex's precise PGXP fields from the raw stored screen coord
- * (rawX,rawY = prim's stored x/y, the GTE output BEFORE the draw-env offset).
- * ofsX/ofsY are added so ppx/ppy line up with vertex.x/.y. pw=0 => shader
- * treats the vertex as affine. Only called when PGXP is on. */
-/* Coverage instrumentation: per 3D vertex, did it resolve precise data by the
- * deterministic prim-field address (det), by the heuristic (x,y) ring (ring),
- * or fall back to affine (miss)? Dumped ~once a second when PGXP is on. Also
- * bumps the address-map generation once per frame (see s_pgxpGen). */
-static unsigned int s_pgxpDet = 0, s_pgxpRingHit = 0, s_pgxpMiss = 0, s_pgxpFrames = 0;
-/* Per-character coverage (verts drawn during the character snap bracket).
- * miss breakdown: noBridge = prim never parked (un-bridged draw path);
- * slotUnres = prim parked but this vertex's scratch addr never resolved (w<0). */
-static unsigned s_charGot = 0, s_charMiss = 0, s_charMissNoBridge = 0, s_charMissSlotUnres = 0;
-extern "C" void PGXP_BumpGen(void);
+static const ShadowEntry* Shadow_Get(const void* addr) {
+	uintptr_t k = (uintptr_t)addr;
+	unsigned s = ShadowHash(k);
+	for (int i = 0; i < 16; i++) {
+		const ShadowEntry* e = &s_shadow[(s + i) & SHADOW_MASK];
+		if (e->key == k) return (e->gen == s_pgxpGen) ? e : nullptr;
+		if (e->key == 0) return nullptr;
+	}
+	return nullptr;
+}
+
+/* GTE store hook (DuckStation SWC2, done at source level): record the precise
+ * projection of the word just written to `addr`. Called from the gte_stsxy*
+ * macros via PGXP_StoreAddr, which reads the integer value back from addr. */
+extern "C" void Shadow_Store(void* addr, float x, float y, float w, unsigned value) {
+	Shadow_Put(addr, x, y, w, value);
+}
+
+/* Drawer copy hook (DuckStation CPU MOVE/SW): the game just did *dst = *src (a
+ * vertex word moving from a GTE scratch slot into a prim field). Propagate the
+ * shadow along the same path so the GPU resolves the prim-field address. If src
+ * isn't tracked, leave dst absent -> clean affine. */
+extern "C" void Shadow_Copy(void* dst, const void* src) {
+	if (!g_PsxUsePgxp) return;
+	const ShadowEntry* e = Shadow_Get(src);
+	if (!e) return;
+	Shadow_Put(dst, e->x, e->y, e->w, *(const unsigned*)dst);
+}
+
+/* GPU draw resolve (DuckStation GetPreciseVertex): shadow at the prim-field
+ * address, validated by exact value and a 2px tolerance. The tolerance is
+ * REQUIRED even on an exact address+value match: for verts behind the camera /
+ * at extreme depth the GTE divide diverges and the unclamped precise float is
+ * garbage (the prim stored the GTE's CLAMPED integer); without the guard the
+ * scene shatters. Miss -> affine (ppw=0). rawX/rawY = the integer in the field;
+ * ofsX/ofsY = draw-env offset added to land in vertex.x/.y space. */
+static inline bool GetPreciseVertex(const void* addr, unsigned value, int rawX, int rawY,
+                                    float ofsX, float ofsY, float* ox, float* oy, float* ow) {
+	const ShadowEntry* e = Shadow_Get(addr);
+	if (e && e->value == value) {
+		float px = e->x, py = e->y;
+		float dx = px - (float)rawX, dy = py - (float)rawY;
+		if (dx > -2.0f && dx < 2.0f && dy > -2.0f && dy < 2.0f) {
+			*ox = px + ofsX; *oy = py + ofsY; *ow = e->w; return true;
+		}
+	}
+	*ox = (float)rawX + ofsX; *oy = (float)rawY + ofsY; *ow = 0.0f; return false;
+}
+
+/* Coverage instrumentation: precise (det) vs affine (miss) per 3D vertex, dumped
+ * ~once a second when PGXP is on. Also bumps the frame generation. */
+static unsigned int s_pgxpDet = 0, s_pgxpMiss = 0, s_pgxpFrames = 0;
 extern "C" void PGXP_CoverageTick(void)
 {
 	PGXP_BumpGen();
-	if (!g_PsxUsePgxp) { s_pgxpDet = s_pgxpRingHit = s_pgxpMiss = 0; return; }
+	if (!g_PsxUsePgxp) { s_pgxpDet = s_pgxpMiss = 0; return; }
 	if (++s_pgxpFrames >= 60)
 	{
-		unsigned int tot = s_pgxpDet + s_pgxpRingHit + s_pgxpMiss;
+		unsigned int tot = s_pgxpDet + s_pgxpMiss;
 		if (tot)
-			eprintinfo("[PGXP] cov %uf: det=%u(%.0f%%) ring=%u(%.0f%%) miss=%u(%.0f%%)\n",
+			eprintinfo("[PGXP] cov %uf: det=%u(%.0f%%) miss=%u(%.0f%%)\n",
 				s_pgxpFrames,
-				s_pgxpDet,     100.0 * (double)s_pgxpDet     / (double)tot,
-				s_pgxpRingHit, 100.0 * (double)s_pgxpRingHit / (double)tot,
-				s_pgxpMiss,    100.0 * (double)s_pgxpMiss    / (double)tot);
-		unsigned ctot = s_charGot + s_charMiss;
-		if (ctot)
-			eprintinfo("[PGXPCHAR] char verts: precise=%u(%.0f%%) miss=%u(%.0f%%) [noBridge=%u slotUnres=%u other=%u]\n",
-				s_charGot,  100.0 * (double)s_charGot  / (double)ctot,
-				s_charMiss, 100.0 * (double)s_charMiss / (double)ctot,
-				s_charMissNoBridge, s_charMissSlotUnres,
-				s_charMiss - s_charMissNoBridge - s_charMissSlotUnres);
-		s_pgxpDet = s_pgxpRingHit = s_pgxpMiss = s_pgxpFrames = 0;
-		s_charGot = s_charMiss = s_charMissNoBridge = s_charMissSlotUnres = 0;
+				s_pgxpDet,  100.0 * (double)s_pgxpDet  / (double)tot,
+				s_pgxpMiss, 100.0 * (double)s_pgxpMiss / (double)tot);
+		s_pgxpDet = s_pgxpMiss = s_pgxpFrames = 0;
 	}
 }
 
-/* ---- Deterministic precise-coord map (keyed by destination address) --------
- * The (x,y)-key ring above is heuristic and mismatches: two vertices that land
- * on the same integer screen pixel within the search window swap precise data
- * -> stretched / corrupt polygons (worst on characters + effect quads, which
- * write screen coords straight into the prim packet). The fix: when the GTE
- * writes a screen coord to a prim's vertex field, record that FIELD ADDRESS ->
- * precise coord here (PGXP_MapPut, called from the store macros / libgs_stub
- * model drawers). At draw time MakeVertex already holds each vertex's field
- * pointer, so PgxpFillVertex resolves it by address — collision-free and
- * winding-independent. The ring stays the fallback for geometry transformed
- * into a scratch buffer and copied into prims by index (the field address was
- * never GTE-written, so the address lookup misses).
- *
- * Packet memory is reused every frame, so each entry carries the frame
- * generation it was written in; a lookup only accepts a current-generation
- * entry, so a prim reusing last frame's address can never read a stale coord. */
-struct PgxpAddrEntry { uintptr_t key; unsigned gen; float x, y, w; };
-/* 2^19 keeps the address map under ~50% (SH transforms ~230k verts/frame) so the
- * bridge resolves scratch addresses instead of overflowing to the ring. Safe to
- * run the parked tier hot now that matching is exact-value (no closest-collapse). */
-#define PGXP_ADDR_BITS 19
-#define PGXP_ADDR_SIZE (1 << PGXP_ADDR_BITS)
-#define PGXP_ADDR_MASK (PGXP_ADDR_SIZE - 1)
-static PgxpAddrEntry s_pgxpAddr[PGXP_ADDR_SIZE];
-static unsigned s_pgxpGen = 1;   /* bumped once per frame (PGXP_CoverageTick) */
+extern "C" void PGXP_FrameReset(void) { /* shadow is gen-stamped; no reset needed */ }
 
-extern "C" void PGXP_BumpGen(void) { s_pgxpGen++; }
+/* ---- Per-prim affine flag (billboards) -------------------------------------
+ * Screen-space prims (billboards, 2D/HUD) build their corners directly, never
+ * through the GTE, so they have no shadow and naturally miss to affine. We mark
+ * them explicitly too: PsyX_SetNextPrimAffine sets a pending flag, addPrim
+ * (PsyX_CaptureGteDepths) records the prim pointer here, and the draw side reads
+ * it to force affine. gen-stamped so a reused packet address from last frame is
+ * rejected. */
+struct AffineEntry { uintptr_t key; unsigned gen; };
+#define AFFINE_BITS 15
+#define AFFINE_SIZE (1u << AFFINE_BITS)
+#define AFFINE_MASK (AFFINE_SIZE - 1u)
+static AffineEntry s_affine[AFFINE_SIZE];
+static int g_primPgxpForceAffine = 0;
 
-extern "C" void PGXP_MapPut(void* addr, float x, float y, float w)
+extern "C" void PsyX_SetNextPrimAffine(void)
 {
-	uintptr_t k = (uintptr_t)addr;
-	unsigned s = (unsigned)((k >> 2) * 2654435761u) & PGXP_ADDR_MASK;
+	if (!g_PsxUsePgxp) return;
+	g_primPgxpForceAffine = 1;
+}
+
+static void AffineStore(const void* prim) {
+	uintptr_t key = (uintptr_t)prim;
+	unsigned s = (unsigned)((key >> 2) * 2654435761u) & AFFINE_MASK;
 	for (int i = 0; i < 16; i++) {
-		PgxpAddrEntry* e = &s_pgxpAddr[(s + i) & PGXP_ADDR_MASK];
-		/* take an exact-key slot, an unused slot, or one left by an old frame */
-		if (e->key == k || e->key == 0 || e->gen != s_pgxpGen) {
-			e->key = k; e->gen = s_pgxpGen; e->x = x; e->y = y; e->w = w; return;
+		AffineEntry* e = &s_affine[(s + i) & AFFINE_MASK];
+		if (e->key == key || e->key == 0 || e->gen != s_pgxpGen) {
+			e->key = key; e->gen = s_pgxpGen; return;
 		}
 	}
-	PgxpAddrEntry* e = &s_pgxpAddr[s];   /* probe exhausted: overwrite base */
-	e->key = k; e->gen = s_pgxpGen; e->x = x; e->y = y; e->w = w;
+	s_affine[s].key = key; s_affine[s].gen = s_pgxpGen;
 }
 
-static bool PGXP_MapGet(void* addr, float* x, float* y, float* w)
-{
-	uintptr_t k = (uintptr_t)addr;
-	unsigned s = (unsigned)((k >> 2) * 2654435761u) & PGXP_ADDR_MASK;
+static bool AffineGet(const void* prim) {
+	uintptr_t key = (uintptr_t)prim;
+	unsigned s = (unsigned)((key >> 2) * 2654435761u) & AFFINE_MASK;
 	for (int i = 0; i < 16; i++) {
-		const PgxpAddrEntry* e = &s_pgxpAddr[(s + i) & PGXP_ADDR_MASK];
-		if (e->key == k)
-			return (e->gen == s_pgxpGen) ? (*x = e->x, *y = e->y, *w = e->w, true) : false;
+		const AffineEntry* e = &s_affine[(s + i) & AFFINE_MASK];
+		if (e->key == key) return e->gen == s_pgxpGen;
 		if (e->key == 0) return false;
 	}
 	return false;
 }
 
-/* ---- Per-prim parked verts for SCRATCH-copied geometry ---------------------
- * bodyprog_80055028's world-mesh drawer transforms verts into a scratch buffer
- * (whose addresses gte_stsxy3c recorded into the map above), then copies them
- * into prims by index. The prim FIELD address was never GTE-written, so the
- * address path can't serve it. Instead that drawer tells us which scratch slots
- * each prim used via PsyX_SetNextPrimPgxp (called from its gated SH_PC_PORT emit
- * site just before addPrim); we resolve those scratch addresses to precise
- * coords, park them, store per-prim by P_TAG pointer at addPrim, and load them
- * at draw (PGXP_BeginPrim).
- *
- * The drawer copies scratch[field_10..13] into poly->x0..x3 IN ORDER, and passes
- * those same four addresses here in the same order, so parked slot i is exactly
- * the precise coord for drawn vertex i. We match BY SLOT (not by integer screen
- * key): keying by (x,y) picks a wrong-but-near vertex (sub-2px) that varies per
- * frame, which on segmented character meshes pulls the segments apart (seams)
- * and wobbles in motion. Slot-matching is exact and frame-stable. w < 0 marks a
- * slot whose scratch address didn't resolve. */
-struct PgxpVtx { float x, y, w; int rawx, rawy; };
-static PgxpVtx g_primPgxpNext[4];
-static int     g_primPgxpNextCount = 0;
-static int     g_primPgxpNextValid = 0;
-static int     g_primPgxpSnapXY = 0;   /* per-prim: a character vertex -> weld it */
+/* Stubs kept so the game drawers still link through Steps 1-4; the call sites and
+ * these stubs are removed in Step 6. The copy propagation that replaces
+ * PsyX_SetNextPrimPgxp is done at the drawer copy sites via Shadow_Copy. */
+extern "C" void PsyX_SetNextPrimPgxp(void* a0, void* a1, void* a2, void* a3) { (void)a0; (void)a1; (void)a2; (void)a3; }
+extern "C" void PsyX_SetNextPrimSnapXY(void) {}
+extern "C" void PsyX_SetPgxpSnapMode(int on) { (void)on; }
+extern "C" void PsyX_PgxpNextBone(void) {}
 
-/* --- Character vertex weld (DuckStation-style seam fix) ---------------------
- * PGXP is an enhancement, NOT PSX-faithful, so characters stay on FULL perspective
- * PGXP (position AND W precise) — that's why flat faces don't facet. The only
- * problem with full PGXP on characters is the bone-joint SEAM: each bone is a
- * separate rigid mesh on its own matrix, so a joint shared by two bones projects
- * to two verts a sub-pixel apart -> a thin gap. The earlier "snap-XY" hid it by
- * pinning XY to the pixel grid, but mixing an affine position with a perspective
- * W faceted the flat faces. Instead WELD: snap a character vertex onto a nearby
- * earlier character vertex (same frame/character) so the shared joint verts
- * coincide exactly. Both keep their precise position+W, so no faceting and no
- * seam. A depth (W) ratio guard stops two different surfaces that merely overlap
- * on screen from welding together. */
-struct WeldEntry { unsigned gen; unsigned bone; float x, y, w; };
-#define WELD_BITS 14
-#define WELD_SIZE (1 << WELD_BITS)
-#define WELD_MASK (WELD_SIZE - 1)
-static WeldEntry s_weld[WELD_SIZE];
-static unsigned  s_weldGen  = 0;
-static unsigned  s_weldBone = 0;  /* current bone within the character (see PsyX_PgxpNextBone) */
-float g_pgxpWeldDistPx = 3.0f;    /* tunable (console WELD): 0 = weld OFF      */
-float g_pgxpWeldWRatio = 1.30f;   /* tunable: max W (depth) ratio to weld     */
-int   g_pgxpCharPersp  = 1;       /* 1 = full perspective PGXP on chars; 0 = affine tex */
-int   g_pgxpCharSnap   = 1;       /* 1 = release pixel-snap chars (no joint seams);
-                                   * 0 = full PGXP (for the identity-weld follow-up) */
+/* Console-tunable globals retained until Step 6 removes the WELD/CHARTEX/CHARSNAP
+ * console commands; no effect under the shadow-memory model. */
+float g_pgxpWeldDistPx = 0.0f;
+float g_pgxpWeldWRatio = 1.30f;
+int   g_pgxpCharPersp  = 1;
+int   g_pgxpCharSnap   = 0;
 
-/* Bumped once per bone mesh by the character draw loop. The weld only fuses two
- * verts from DIFFERENT bones (a real shared joint) and never within one bone, so
- * a generous radius can close knee/shoulder/neck seams without collapsing dense
- * same-bone detail (e.g. the face — which a flat distance weld shredded on the
- * foreshortened side). */
-extern "C" void PsyX_PgxpNextBone(void) { s_weldBone++; }
+static bool s_curPgxpAffine = false;
+static void PGXP_BeginPrim(const void* prim) { s_curPgxpAffine = AffineGet(prim); }
 
-static inline unsigned WeldHash(int ix, int iy) {
-	return ((unsigned)ix * 73856093u) ^ ((unsigned)iy * 19349663u);
-}
-static void WeldReset(void) { s_weldGen++; s_weldBone = 0; }   /* per character */
-static void WeldVertex(float* x, float* y, float* w) {
-	const float thr2 = g_pgxpWeldDistPx * g_pgxpWeldDistPx;
-	int ix = (int)(*x < 0 ? *x - 0.5f : *x + 0.5f);
-	int iy = (int)(*y < 0 ? *y - 0.5f : *y + 0.5f);
-	/* Cells are 1px, so the search neighbourhood MUST cover the full weld radius
-	 * or distant joints are inside thr2 but never examined (the old fixed 3x3 =
-	 * +/-1px capped the effective radius at ~1.5px regardless of g_pgxpWeldDistPx,
-	 * which is why raising WELD did nothing). Cap to keep the cost bounded. */
-	int r = (int)(g_pgxpWeldDistPx + 0.999f);
-	if (r < 1) r = 1; else if (r > 8) r = 8;
-	for (int dy = -r; dy <= r; dy++)
-	for (int dx = -r; dx <= r; dx++) {
-		WeldEntry* e = &s_weld[WeldHash(ix + dx, iy + dy) & WELD_MASK];
-		if (e->gen != s_weldGen) continue;
-		if (e->bone == s_weldBone) continue;        /* same bone -> don't fuse (face detail) */
-		float ex = e->x - *x, ey = e->y - *y;
-		if (ex * ex + ey * ey > thr2) continue;
-		float lo = e->w < *w ? e->w : *w, hi = e->w < *w ? *w : e->w;
-		if (lo > 0.0f && hi <= lo * g_pgxpWeldWRatio) { *x = e->x; *y = e->y; *w = e->w; return; }
-	}
-	WeldEntry* e = &s_weld[WeldHash(ix, iy) & WELD_MASK];
-	e->gen = s_weldGen; e->bone = s_weldBone; e->x = *x; e->y = *y; e->w = *w;
-}
-
-/* Persistent "character" mode: while on, every bridged prim's verts are flagged
- * for welding. The character bone-draw loop brackets its draws with it (and the
- * enable resets the weld set) so welding is scoped to a single character. */
-static int     g_pgxpSnapMode = 0;
-extern "C" void PsyX_SetPgxpSnapMode(int on) { g_pgxpSnapMode = on ? 1 : 0; if (on) WeldReset(); }
-
-extern "C" void PsyX_SetNextPrimPgxp(void* a0, void* a1, void* a2, void* a3)
+/* Fill a GrVertex's precise PGXP fields (ppx/ppy/ppw) from the shadow at the
+ * vertex's prim-field address. ppw>0 selects the shader's perspective path;
+ * ppw=0 is affine. addr = the field pointer (MakeVertex has it); rawX/rawY = the
+ * integer coord in that field. */
+static inline void PgxpFillVertex(GrVertex* v, const void* addr, int rawX, int rawY, float ofsX, float ofsY)
 {
-	if (!g_PsxUsePgxp) return;
-	void* addrs[4] = { a0, a1, a2, a3 };
-	for (int i = 0; i < 4; i++) {
-		float x, y, w;
-		if (addrs[i] && PGXP_MapGet(addrs[i], &x, &y, &w)) {
-			g_primPgxpNext[i].x = x; g_primPgxpNext[i].y = y; g_primPgxpNext[i].w = w;
-			/* The scratch word IS the packed integer (x,y) the drawer copies into the
-			 * prim, so record it as this vertex's exact identity. At draw we match the
-			 * drawn vertex BY THIS VALUE (DuckStation's vert->value == value), not by
-			 * slot or nearest — no collapse, no misalignment. */
-			int packed = *(int*)addrs[i];
-			g_primPgxpNext[i].rawx = (int)(short)(packed & 0xFFFF);
-			g_primPgxpNext[i].rawy = (int)(short)((packed >> 16) & 0xFFFF);
-		} else {
-			g_primPgxpNext[i].w = -1.0f; /* slot unresolved -> affine */
-		}
+	if (s_curPgxpAffine) {
+		v->ppx = (float)v->x; v->ppy = (float)v->y; v->ppw = 0.0f; s_pgxpMiss++; return;
 	}
-	g_primPgxpNextCount = 4;
-	g_primPgxpNextValid = 1;
-	if (g_pgxpSnapMode) g_primPgxpSnapXY = 1;
-}
-
-/* Force the NEXT addPrim to render affine (no PGXP). For screen-space prims
- * (billboards) whose corners are built in screen space and never GTE-projected,
- * PGXP has no real data for them and only collides them against the ring -
- * small ones collapse their corners onto their own projected centre (the tree-
- * foliage "spikes"). Billboards are camera-facing flat quads with no perspective
- * to correct, so affine is the correct result. Captured per-prim, then cleared. */
-static int g_primPgxpForceAffine = 0;
-extern "C" void PsyX_SetNextPrimAffine(void)
-{
-	if (!g_PsxUsePgxp) return;
-	g_primPgxpForceAffine = 1;
-	g_primPgxpNextValid = 1;   /* make PsyX_CaptureGteDepths park (store) the flag */
-}
-
-/* Mark the NEXT addPrim's verts as character verts to be welded (see WeldVertex):
- * full perspective PGXP is kept, but coincident bone-joint verts snap together so
- * the joints don't seam. Per-prim form; the bone loop normally uses the persistent
- * PsyX_SetPgxpSnapMode instead. (g_primPgxpSnapXY is declared with the bridge
- * globals above so PsyX_SetNextPrimPgxp can set it.) */
-extern "C" void PsyX_SetNextPrimSnapXY(void)
-{
-	if (!g_PsxUsePgxp) return;
-	g_primPgxpSnapXY = 1;
-	g_primPgxpNextValid = 1;
-}
-
-/* gen-stamped (like the address map): GsDrawOt clears this table at the START of
- * the draw — AFTER addPrim stored into it but BEFORE DrawOTag reads it — so a
- * plain memset wipes the data before use. Stamping each entry with the frame
- * generation lets the parked set survive that mistimed clear: store and draw
- * happen in the same frame (same gen), and next frame's entries are rejected. */
-struct PgxpPrimEntry { uintptr_t key; unsigned gen; int n; int affine; int snapXY; PgxpVtx v[4]; };
-/* 2^17 keeps the per-prim parked table under ~50% (~60k prims/frame) so parked sets
- * survive to draw. Safe now that the draw-time match is exact-value, not closest. */
-#define PGXP_PRIM_BITS 17
-#define PGXP_PRIM_SIZE (1 << PGXP_PRIM_BITS)
-#define PGXP_PRIM_MASK (PGXP_PRIM_SIZE - 1)
-static PgxpPrimEntry g_pgxpPrimTable[PGXP_PRIM_SIZE];
-
-static void PgxpPrimStore(const void* prim)
-{
-	uintptr_t key = (uintptr_t)prim;
-	unsigned s = (unsigned)((key >> 2) * 2654435761u) & PGXP_PRIM_MASK;
-	for (int i = 0; i < 16; i++) {
-		PgxpPrimEntry* e = &g_pgxpPrimTable[(s + i) & PGXP_PRIM_MASK];
-		if (e->key == key || e->key == 0 || e->gen != s_pgxpGen) {
-			e->key = key; e->gen = s_pgxpGen; e->n = g_primPgxpNextCount;
-			e->affine = g_primPgxpForceAffine;
-			e->snapXY = g_primPgxpSnapXY;
-			for (int j = 0; j < g_primPgxpNextCount; j++) e->v[j] = g_primPgxpNext[j];
-			return;
-		}
-	}
-}
-
-static const PgxpVtx* s_curPgxp = nullptr;
-static int s_curPgxpN = 0;
-static int s_curPgxpAffine = 0;
-static int s_curPgxpSnapXY = 0;
-
-static void PGXP_BeginPrim(const void* prim)
-{
-	s_curPgxp = nullptr; s_curPgxpN = 0; s_curPgxpAffine = 0; s_curPgxpSnapXY = 0;
-	uintptr_t key = (uintptr_t)prim;
-	unsigned s = (unsigned)((key >> 2) * 2654435761u) & PGXP_PRIM_MASK;
-	for (int i = 0; i < 16; i++) {
-		const PgxpPrimEntry* e = &g_pgxpPrimTable[(s + i) & PGXP_PRIM_MASK];
-		if (e->key == key) {
-			if (e->gen == s_pgxpGen) { s_curPgxp = e->v; s_curPgxpN = e->n; s_curPgxpAffine = e->affine; s_curPgxpSnapXY = e->snapXY; }
-			return;
-		}
-		if (e->key == 0) return;
-	}
-}
-
-/* A vertex's precise float screen coord is the unrounded version of the integer
- * coord stored in the same prim field, so they agree to <1px. A larger gap means
- * we matched the WRONG vertex (an (x,y)-key collision in the parked/ring tiers,
- * or an off-screen-clamped coord). Reject it: the vertex falls back to affine
- * (correct geometry, texture swims) instead of warping to a wrong position. */
-static inline bool PgxpAccept(float fx, float fy, int rawX, int rawY)
-{
-	float dx = fx - (float)rawX, dy = fy - (float)rawY;
-	return dx > -2.0f && dx < 2.0f && dy > -2.0f && dy < 2.0f;
-}
-
-/* addr = the vertex's prim-field pointer (MakeVertex has it); rawX/rawY = the
- * integer coord read from that field, used for the parked/ring matches. */
-static inline void PgxpFillVertex(GrVertex* v, const void* addr, int rawX, int rawY, float ofsX, float ofsY, unsigned short hint, int slot)
-{
-	float fx, fy, fw;
-	/* 0) prim explicitly marked affine (billboards): screen-space corners have no
-	 *    GTE projection to match, so force the affine path instead of a ring collision. */
-	if (s_curPgxpAffine)
-	{
-		v->ppx = (float)v->x;
-		v->ppy = (float)v->y;
-		v->ppw = 0.0f;
-		s_pgxpMiss++;
-		return;
-	}
-
-	float hx = 0.0f, hy = 0.0f, hw = 0.0f;
-	int got = 0;
-
-	/* 1) deterministic by prim-field address. The 2px guard is REQUIRED: for verts
-	 *    behind the camera / at extreme depth the GTE divide (H/SZ3) diverges and
-	 *    the unclamped precise float is garbage (the GTE clamps the integer to
-	 *    survive it). PgxpAccept rejects that garbage back to affine; without it the
-	 *    whole scene shatters. So the guard is not optional, even on exact matches. */
-	if (PGXP_MapGet((void*)addr, &fx, &fy, &fw) && PgxpAccept(fx, fy, rawX, rawY))
-	{
-		hx = fx + ofsX; hy = fy + ofsY; hw = fw; got = 1; s_pgxpDet++;
-	}
-	/* 2) deterministic per-prim parked set (scratch-copied world + characters).
-	 *    DuckStation keys on a UNIQUE address and only validates with the value; our
-	 *    unique per-vertex key is the SLOT (slot i == this drawn vertex, since the
-	 *    drawer copies scratch[field_10..13] into poly->x0..x3 in that order). So:
-	 *    take parked slot `slot`, VALIDATE it with the exact value (catches a
-	 *    misaligned drawer -> affine, never a wrong precise), then the tolerance
-	 *    garbage-guard. Keying by value instead would FUSE two corners that share a
-	 *    pixel (rampant on dense distant meshes like Harry's legs) into a flat face. */
-	else if (s_curPgxpN)
-	{
-		if (slot >= 0 && slot < s_curPgxpN && s_curPgxp[slot].w >= 0.0f &&
-		    s_curPgxp[slot].rawx == rawX && s_curPgxp[slot].rawy == rawY &&
-		    PgxpAccept(s_curPgxp[slot].x, s_curPgxp[slot].y, rawX, rawY))
-		{
-			hx = s_curPgxp[slot].x + ofsX; hy = s_curPgxp[slot].y + ofsY; hw = s_curPgxp[slot].w; got = 1; s_pgxpDet++;
-		}
-	}
-	/* 3) heuristic (x,y)-key ring — immediate prims, fallback */
-	if (!got && PGXP_LookupHinted(rawX, rawY, hint, &fx, &fy, &fw) && PgxpAccept(fx, fy, rawX, rawY))
-	{
-		hx = fx + ofsX; hy = fy + ofsY; hw = fw; got = 1; s_pgxpRingHit++;
-	}
-
-	if (got)
-	{
-		if (s_curPgxpSnapXY)
-		{
-			s_charGot++;
-			if (g_pgxpCharSnap)
-			{
-				/* RELEASE-SAFE pixel-snap (the prior release's character look): pin XY
-				 * to the affine integer grid so adjacent bone segments meet on the same
-				 * pixel — no joint seams — and keep the perspective W. The proper
-				 * full-PGXP-with-no-seams fix (per-vertex identity tracking so the 18%
-				 * miss resolves) is the planned follow-up; CHARSNAP 0 selects it. */
-				v->ppx = (float)v->x;
-				v->ppy = (float)v->y;
-				v->ppw = hw;
-			}
-			else
-			{
-				/* Full perspective PGXP + optional cross-bone WELD (console WELD>0). */
-				if (g_pgxpWeldDistPx > 0.0f) WeldVertex(&hx, &hy, &hw);
-				v->ppx = hx;
-				v->ppy = hy;
-				v->ppw = g_pgxpCharPersp ? hw : 1.0f;
-			}
-		}
-		else
-		{
-			v->ppx = hx;
-			v->ppy = hy;
-			v->ppw = hw;
-		}
-	}
-	else
-	{
-		v->ppx = (float)v->x;
-		v->ppy = (float)v->y;
-		v->ppw = 0.0f; /* miss -> affine */
-		s_pgxpMiss++;
-		if (s_curPgxpSnapXY) {
-			s_charMiss++;
-			if (s_curPgxpN == 0)
-				s_charMissNoBridge++;
-			else if (slot >= 0 && slot < s_curPgxpN && s_curPgxp[slot].w < 0.0f)
-				s_charMissSlotUnres++;
-		}
+	float ox, oy, ow;
+	if (GetPreciseVertex(addr, *(const unsigned*)addr, rawX, rawY, ofsX, ofsY, &ox, &oy, &ow)) {
+		v->ppx = ox; v->ppy = oy; v->ppw = ow; s_pgxpDet++;
+	} else {
+		v->ppx = (float)v->x; v->ppy = (float)v->y; v->ppw = 0.0f; s_pgxpMiss++;
 	}
 }
 
@@ -550,24 +288,12 @@ extern "C" void PsyX_SetNextPrimSz(unsigned short s0, unsigned short s1, unsigne
 
 extern "C" void PsyX_CaptureGteDepths(void* prim)
 {
-	/* PGXP: record the GTE ring position for this prim so MakeVertex* can find
-	 * its precise vertices (ring fallback) at draw time. Harmless when PGXP
-	 * off. */
-	PGXP_StampPrim(prim);
-
-	/* PGXP scratch-geometry path: if the emit site resolved this prim's precise
-	 * verts (PsyX_SetNextPrimPgxp), park them per-prim now (stable to draw).
-	 * The valid flag is NOT cleared here: one emit-bridge call feeds SEVERAL
-	 * addPrims sharing the same vertices (the fog base poly + fog overlay poly +
-	 * state packets). Clearing after the first left the overlay poly on the
-	 * collision ring, mismatching the base layer (character seams). It's
-	 * overwritten by the next PsyX_SetNextPrimPgxp; unrelated later prims get
-	 * rejected by the per-vertex distance guard. */
-	if (g_primPgxpNextValid) {
-		PgxpPrimStore(prim);
+	/* PGXP: if the next prim was flagged screen-space (billboards), record it so
+	 * the draw side forces affine. Per-prim, then cleared. */
+	if (g_primPgxpForceAffine) {
+		AffineStore(prim);
+		g_primPgxpForceAffine = 0;
 	}
-	g_primPgxpForceAffine = 0;   /* strictly per-prim, even if the probe was full */
-	g_primPgxpSnapXY = 0;
 
 	uintptr_t key = (uintptr_t)prim;
 	int slot = (int)((key >> 2) & SZ_TABLE_MASK);
@@ -609,17 +335,11 @@ extern "C" void PsyX_ClearGteDepthTable(void)
 	g_szMaxThisFrame = 0;
 	memset(g_szTable, 0, sizeof(g_szTable));
 	g_primSzNextValid = 0;
-	/* g_pgxpPrimTable is gen-stamped, NOT cleared here: this runs at the start of
-	 * GsDrawOt, after addPrim filled it but before DrawOTag reads it, so a memset
-	 * would wipe the current frame's parked verts before use. */
-	g_primPgxpNextValid = 0;
-	g_primPgxpNextCount = 0;
+	/* s_shadow / s_affine are gen-stamped, NOT cleared here: this runs at the start
+	 * of GsDrawOt, after addPrim filled them but before DrawOTag reads them, so a
+	 * memset would wipe the current frame's entries before use. */
 	g_primPgxpForceAffine = 0;
-	g_primPgxpSnapXY = 0;
-	s_curPgxpAffine = 0;
-	s_curPgxpSnapXY = 0;
-	s_curPgxp = nullptr;
-	s_curPgxpN = 0;
+	s_curPgxpAffine = false;
 }
 
 static bool PsyX_LookupGteDepths(const void* prim, uint16_t* sz)
@@ -825,9 +545,9 @@ void MakeVertexTriangle(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* 
 
 	if (g_PsxUsePgxp)
 	{
-		PgxpFillVertex(&vertex[0], p0, p0[0], p0[1], ofsX, ofsY, gteidx, 0);
-		PgxpFillVertex(&vertex[1], p1, p1[0], p1[1], ofsX, ofsY, gteidx, 1);
-		PgxpFillVertex(&vertex[2], p2, p2[0], p2[1], ofsX, ofsY, gteidx, 2);
+		PgxpFillVertex(&vertex[0], p0, p0[0], p0[1], ofsX, ofsY);
+		PgxpFillVertex(&vertex[1], p1, p1[0], p1[1], ofsX, ofsY);
+		PgxpFillVertex(&vertex[2], p2, p2[0], p2[1], ofsX, ofsY);
 	}
 
 	ScreenCoordsToEmulator(vertex, 3);
@@ -861,10 +581,10 @@ void MakeVertexQuad(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* p2, 
 
 	if (g_PsxUsePgxp)
 	{
-		PgxpFillVertex(&vertex[0], p0, p0[0], p0[1], ofsX, ofsY, gteidx, 0);
-		PgxpFillVertex(&vertex[1], p1, p1[0], p1[1], ofsX, ofsY, gteidx, 1);
-		PgxpFillVertex(&vertex[2], p2, p2[0], p2[1], ofsX, ofsY, gteidx, 2);
-		PgxpFillVertex(&vertex[3], p3, p3[0], p3[1], ofsX, ofsY, gteidx, 3);
+		PgxpFillVertex(&vertex[0], p0, p0[0], p0[1], ofsX, ofsY);
+		PgxpFillVertex(&vertex[1], p1, p1[0], p1[1], ofsX, ofsY);
+		PgxpFillVertex(&vertex[2], p2, p2[0], p2[1], ofsX, ofsY);
+		PgxpFillVertex(&vertex[3], p3, p3[0], p3[1], ofsX, ofsY);
 	}
 
 	ScreenCoordsToEmulator(vertex, 4);

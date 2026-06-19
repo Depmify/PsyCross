@@ -247,6 +247,11 @@ extern void PsyX_SetPgxpSnapMode(int on);
 extern void PsyX_PgxpNextBone(void);
 /* PGXP: record addr->precise from the gte_stsxy* store macros. Internal. */
 extern void PGXP_StoreAddr(void* addr, int slot);
+/* PGXP shadow propagation: after a drawer copies a vertex word from a GTE scratch
+ * slot into a prim field (*dst = *src), propagate the precise projection so the
+ * GPU resolves the prim-field address at draw. Replaces PsyX_SetNextPrimPgxp.
+ * No-op when PGXP is off or src is untracked. */
+extern void Shadow_Copy(void* dst, const void* src);
 #ifdef __cplusplus
 }
 #endif
