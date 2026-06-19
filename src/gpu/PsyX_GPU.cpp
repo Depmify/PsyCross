@@ -152,13 +152,10 @@ extern "C" void PGXP_CoverageTick(void)
  * generation it was written in; a lookup only accepts a current-generation
  * entry, so a prim reusing last frame's address can never read a stale coord. */
 struct PgxpAddrEntry { uintptr_t key; unsigned gen; float x, y, w; };
-/* Reverted to 2^17: the larger tables pushed most prims through the parked tier,
- * which exposed the closest-(x,y) fallback collapsing detail on dense meshes
- * (pews / crucifix / character faces). Back to the release-before-last sizing
- * where those prims hit the ring and the environment looked perfect. The wobble
- * win from the bigger tables is traded back until the parked-tier collapse is
- * fixed at the root. */
-#define PGXP_ADDR_BITS 17
+/* 2^19 keeps the address map under ~50% (SH transforms ~230k verts/frame) so the
+ * bridge resolves scratch addresses instead of overflowing to the ring. Safe to
+ * run the parked tier hot now that matching is exact-value (no closest-collapse). */
+#define PGXP_ADDR_BITS 19
 #define PGXP_ADDR_SIZE (1 << PGXP_ADDR_BITS)
 #define PGXP_ADDR_MASK (PGXP_ADDR_SIZE - 1)
 static PgxpAddrEntry s_pgxpAddr[PGXP_ADDR_SIZE];
@@ -211,7 +208,7 @@ static bool PGXP_MapGet(void* addr, float* x, float* y, float* w)
  * frame, which on segmented character meshes pulls the segments apart (seams)
  * and wobbles in motion. Slot-matching is exact and frame-stable. w < 0 marks a
  * slot whose scratch address didn't resolve. */
-struct PgxpVtx { float x, y, w; };
+struct PgxpVtx { float x, y, w; int rawx, rawy; };
 static PgxpVtx g_primPgxpNext[4];
 static int     g_primPgxpNextCount = 0;
 static int     g_primPgxpNextValid = 0;
@@ -291,6 +288,13 @@ extern "C" void PsyX_SetNextPrimPgxp(void* a0, void* a1, void* a2, void* a3)
 		float x, y, w;
 		if (addrs[i] && PGXP_MapGet(addrs[i], &x, &y, &w)) {
 			g_primPgxpNext[i].x = x; g_primPgxpNext[i].y = y; g_primPgxpNext[i].w = w;
+			/* The scratch word IS the packed integer (x,y) the drawer copies into the
+			 * prim, so record it as this vertex's exact identity. At draw we match the
+			 * drawn vertex BY THIS VALUE (DuckStation's vert->value == value), not by
+			 * slot or nearest — no collapse, no misalignment. */
+			int packed = *(int*)addrs[i];
+			g_primPgxpNext[i].rawx = (int)(short)(packed & 0xFFFF);
+			g_primPgxpNext[i].rawy = (int)(short)((packed >> 16) & 0xFFFF);
 		} else {
 			g_primPgxpNext[i].w = -1.0f; /* slot unresolved -> affine */
 		}
@@ -332,11 +336,9 @@ extern "C" void PsyX_SetNextPrimSnapXY(void)
  * generation lets the parked set survive that mistimed clear: store and draw
  * happen in the same frame (same gen), and next frame's entries are rejected. */
 struct PgxpPrimEntry { uintptr_t key; unsigned gen; int n; int affine; int snapXY; PgxpVtx v[4]; };
-/* Reverted to 2^13 (release-before-last sizing): the larger table parked most
- * prims and exposed the closest-(x,y) collapse on dense meshes. Smaller table ->
- * most prims overflow to the ring -> environment looks perfect again, at the cost
- * of the wobble win, until the parked-tier collapse is fixed at the root. */
-#define PGXP_PRIM_BITS 13
+/* 2^17 keeps the per-prim parked table under ~50% (~60k prims/frame) so parked sets
+ * survive to draw. Safe now that the draw-time match is exact-value, not closest. */
+#define PGXP_PRIM_BITS 17
 #define PGXP_PRIM_SIZE (1 << PGXP_PRIM_BITS)
 #define PGXP_PRIM_MASK (PGXP_PRIM_SIZE - 1)
 static PgxpPrimEntry g_pgxpPrimTable[PGXP_PRIM_SIZE];
@@ -417,29 +419,20 @@ static inline void PgxpFillVertex(GrVertex* v, const void* addr, int rawX, int r
 		hx = fx + ofsX; hy = fy + ofsY; hw = fw; got = 1; s_pgxpDet++;
 	}
 	/* 2) deterministic per-prim parked set (scratch-copied world + characters).
-	 *    The drawer parks verts in poly x0..x3 order and MakeVertex draws them in
-	 *    that same order, so parked slot `slot` IS this drawn vertex's own precise
-	 *    coord — use it (exact W), but keep the guard (same garbage-precise reason
-	 *    as tier 1). Closest-(x,y) is the fallback when the slot fails. */
+	 *    DuckStation-faithful: match the drawn vertex to the parked vertex whose
+	 *    stored integer value EQUALS this one (rawx==rawX && rawy==rawY), then accept
+	 *    only if its precise coord is within tolerance (garbage guard). No slot-index
+	 *    (can misalign) and no closest-(x,y) (fused two corners onto one vertex ->
+	 *    flat collapsed faces). An unmatched vertex stays affine, never collapsed. */
 	else if (s_curPgxpN)
 	{
-		if (slot >= 0 && slot < s_curPgxpN && s_curPgxp[slot].w >= 0.0f &&
-		    PgxpAccept(s_curPgxp[slot].x, s_curPgxp[slot].y, rawX, rawY))
-		{
-			hx = s_curPgxp[slot].x + ofsX; hy = s_curPgxp[slot].y + ofsY; hw = s_curPgxp[slot].w; got = 1; s_pgxpDet++;
-		}
-		else
-		{
-			int best = -1; float bestD = 1e30f;
-			for (int i = 0; i < s_curPgxpN; i++) {
-				if (s_curPgxp[i].w < 0.0f) continue;       /* unresolved slot */
-				float dx = s_curPgxp[i].x - (float)rawX, dy = s_curPgxp[i].y - (float)rawY;
-				float d = dx * dx + dy * dy;
-				if (d < bestD) { bestD = d; best = i; }
+		for (int i = 0; i < s_curPgxpN; i++) {
+			if (s_curPgxp[i].w < 0.0f) continue;                 /* unresolved slot */
+			if (s_curPgxp[i].rawx != rawX || s_curPgxp[i].rawy != rawY) continue;
+			if (PgxpAccept(s_curPgxp[i].x, s_curPgxp[i].y, rawX, rawY)) {
+				hx = s_curPgxp[i].x + ofsX; hy = s_curPgxp[i].y + ofsY; hw = s_curPgxp[i].w; got = 1; s_pgxpDet++;
 			}
-			if (best >= 0 && bestD <= 4.0f) {   /* within 2px -> this vertex's own precise */
-				hx = s_curPgxp[best].x + ofsX; hy = s_curPgxp[best].y + ofsY; hw = s_curPgxp[best].w; got = 1; s_pgxpDet++;
-			}
+			break;                                               /* exact value found -> done */
 		}
 	}
 	/* 3) heuristic (x,y)-key ring — immediate prims, fallback */
