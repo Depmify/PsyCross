@@ -219,6 +219,8 @@ static WeldEntry s_weld[WELD_SIZE];
 static unsigned  s_weldGen = 0;
 float g_pgxpWeldDistPx = 2.5f;    /* tunable: max screen gap (px) to weld    */
 float g_pgxpWeldWRatio = 1.30f;   /* tunable: max W (depth) ratio to weld    */
+int   g_pgxpCharPersp  = 0;       /* 0 = affine texture on characters (looks like
+                                   * affine, no swim); 1 = perspective texture    */
 
 static inline unsigned WeldHash(int ix, int iy) {
 	return ((unsigned)ix * 73856093u) ^ ((unsigned)iy * 19349663u);
@@ -410,13 +412,25 @@ static inline void PgxpFillVertex(GrVertex* v, const void* addr, int rawX, int r
 
 	if (got)
 	{
-		/* Character verts (snap mode): weld coincident bone-joint verts to a common
-		 * precise position so the seam closes — while keeping FULL perspective
-		 * (position+W stay precise, so flat faces don't facet). See WeldVertex. */
-		if (s_curPgxpSnapXY) WeldVertex(&hx, &hy, &hw);
-		v->ppx = hx;
-		v->ppy = hy;
-		v->ppw = hw;
+		if (s_curPgxpSnapXY)
+		{
+			/* Character vertex. Weld coincident bone-joint verts so the joints don't
+			 * seam (positions stay PRECISE -> no pixel-snap wobble), but interpolate
+			 * the varyings AFFINELY (ppw=1) by default: perspective interpolation on
+			 * big flat character polys is what swims/facets. Precise position + affine
+			 * texture = "looks like affine, just no wobble" (the DuckStation look).
+			 * Set CHARTEX 1 to give characters perspective texture instead. */
+			WeldVertex(&hx, &hy, &hw);
+			v->ppx = hx;
+			v->ppy = hy;
+			v->ppw = g_pgxpCharPersp ? hw : 1.0f;
+		}
+		else
+		{
+			v->ppx = hx;
+			v->ppy = hy;
+			v->ppw = hw;
+		}
 	}
 	else
 	{
