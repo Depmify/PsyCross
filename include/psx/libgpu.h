@@ -232,6 +232,15 @@ extern void PsyX_SetNextPrimPgxp(void* a0, void* a1, void* a2, void* a3);
  * PGXP has no real data for them and would collide them against the ring -
  * collapsing/warping them. No-op when PGXP is off. */
 extern void PsyX_SetNextPrimAffine(void);
+/* PGXP: keep the next prim's perspective W (texture correction) but pin each
+ * vertex to the affine integer screen position. For rigid segmented meshes
+ * (character bones) so adjacent segments' joint verts stop showing a sub-pixel
+ * seam, without losing texture perspective. No-op when PGXP is off. */
+extern void PsyX_SetNextPrimSnapXY(void);
+/* PGXP: while on, every bridged prim is flagged snap-XY (see above). Bracket the
+ * character bone-draw loop so all rigid segments snap to the pixel grid (no joint
+ * seams) without touching the shared mesh drawer's emit sites. No-op when PGXP off. */
+extern void PsyX_SetPgxpSnapMode(int on);
 /* PGXP: record addr->precise from the gte_stsxy* store macros. Internal. */
 extern void PGXP_StoreAddr(void* addr, int slot);
 #ifdef __cplusplus

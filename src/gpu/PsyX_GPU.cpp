@@ -197,6 +197,13 @@ struct PgxpVtx { float x, y, w; };
 static PgxpVtx g_primPgxpNext[4];
 static int     g_primPgxpNextCount = 0;
 static int     g_primPgxpNextValid = 0;
+static int     g_primPgxpSnapXY = 0;   /* per-prim: keep W, pin XY to affine (char bones) */
+/* Persistent "snap-XY" mode: while on, every bridged prim is flagged snap-XY.
+ * The character bone-draw loop brackets its draws with it so all rigid bone
+ * segments snap to the pixel grid (no joint seams) without touching the 4 emit
+ * sites in the shared mesh drawer. */
+static int     g_pgxpSnapMode = 0;
+extern "C" void PsyX_SetPgxpSnapMode(int on) { g_pgxpSnapMode = on ? 1 : 0; }
 
 extern "C" void PsyX_SetNextPrimPgxp(void* a0, void* a1, void* a2, void* a3)
 {
@@ -212,6 +219,7 @@ extern "C" void PsyX_SetNextPrimPgxp(void* a0, void* a1, void* a2, void* a3)
 	}
 	g_primPgxpNextCount = 4;
 	g_primPgxpNextValid = 1;
+	if (g_pgxpSnapMode) g_primPgxpSnapXY = 1;
 }
 
 /* Force the NEXT addPrim to render affine (no PGXP). For screen-space prims
@@ -228,12 +236,26 @@ extern "C" void PsyX_SetNextPrimAffine(void)
 	g_primPgxpNextValid = 1;   /* make PsyX_CaptureGteDepths park (store) the flag */
 }
 
+/* Force the NEXT addPrim to keep its perspective W (texture correction) but pin
+ * each vertex's screen position to the affine integer coord. For rigid segmented
+ * meshes (character bones): true per-vertex precision makes adjacent segments'
+ * overlapping joint verts land sub-pixel apart -> a seam that affine hid by
+ * pixel-snapping. Snapping XY back removes the seam while keeping the texture
+ * perspective-correct. Captured per-prim, then cleared. (g_primPgxpSnapXY is
+ * declared with the bridge globals above so PsyX_SetNextPrimPgxp can set it.) */
+extern "C" void PsyX_SetNextPrimSnapXY(void)
+{
+	if (!g_PsxUsePgxp) return;
+	g_primPgxpSnapXY = 1;
+	g_primPgxpNextValid = 1;
+}
+
 /* gen-stamped (like the address map): GsDrawOt clears this table at the START of
  * the draw — AFTER addPrim stored into it but BEFORE DrawOTag reads it — so a
  * plain memset wipes the data before use. Stamping each entry with the frame
  * generation lets the parked set survive that mistimed clear: store and draw
  * happen in the same frame (same gen), and next frame's entries are rejected. */
-struct PgxpPrimEntry { uintptr_t key; unsigned gen; int n; int affine; PgxpVtx v[4]; };
+struct PgxpPrimEntry { uintptr_t key; unsigned gen; int n; int affine; int snapXY; PgxpVtx v[4]; };
 #define PGXP_PRIM_BITS 13
 #define PGXP_PRIM_SIZE (1 << PGXP_PRIM_BITS)
 #define PGXP_PRIM_MASK (PGXP_PRIM_SIZE - 1)
@@ -248,6 +270,7 @@ static void PgxpPrimStore(const void* prim)
 		if (e->key == key || e->key == 0 || e->gen != s_pgxpGen) {
 			e->key = key; e->gen = s_pgxpGen; e->n = g_primPgxpNextCount;
 			e->affine = g_primPgxpForceAffine;
+			e->snapXY = g_primPgxpSnapXY;
 			for (int j = 0; j < g_primPgxpNextCount; j++) e->v[j] = g_primPgxpNext[j];
 			return;
 		}
@@ -257,16 +280,17 @@ static void PgxpPrimStore(const void* prim)
 static const PgxpVtx* s_curPgxp = nullptr;
 static int s_curPgxpN = 0;
 static int s_curPgxpAffine = 0;
+static int s_curPgxpSnapXY = 0;
 
 static void PGXP_BeginPrim(const void* prim)
 {
-	s_curPgxp = nullptr; s_curPgxpN = 0; s_curPgxpAffine = 0;
+	s_curPgxp = nullptr; s_curPgxpN = 0; s_curPgxpAffine = 0; s_curPgxpSnapXY = 0;
 	uintptr_t key = (uintptr_t)prim;
 	unsigned s = (unsigned)((key >> 2) * 2654435761u) & PGXP_PRIM_MASK;
 	for (int i = 0; i < 16; i++) {
 		const PgxpPrimEntry* e = &g_pgxpPrimTable[(s + i) & PGXP_PRIM_MASK];
 		if (e->key == key) {
-			if (e->gen == s_pgxpGen) { s_curPgxp = e->v; s_curPgxpN = e->n; s_curPgxpAffine = e->affine; }
+			if (e->gen == s_pgxpGen) { s_curPgxp = e->v; s_curPgxpN = e->n; s_curPgxpAffine = e->affine; s_curPgxpSnapXY = e->snapXY; }
 			return;
 		}
 		if (e->key == 0) return;
@@ -299,15 +323,15 @@ static inline void PgxpFillVertex(GrVertex* v, const void* addr, int rawX, int r
 		s_pgxpMiss++;
 		return;
 	}
+
+	float hx = 0.0f, hy = 0.0f, hw = 0.0f;
+	int got = 0;
+
 	/* 1) deterministic by prim-field address: direct-to-prim geometry
 	 *    (effect quads via gte_stsxy3_g3, character models via libgs_stub) */
 	if (PGXP_MapGet((void*)addr, &fx, &fy, &fw) && PgxpAccept(fx, fy, rawX, rawY))
 	{
-		v->ppx = fx + ofsX;
-		v->ppy = fy + ofsY;
-		v->ppw = fw;
-		s_pgxpDet++;
-		return;
+		hx = fx + ofsX; hy = fy + ofsY; hw = fw; got = 1; s_pgxpDet++;
 	}
 	/* 2) deterministic per-prim parked set (scratch-copied world + characters).
 	 *    The drawer parks verts in poly x0..x3 order and MakeVertex draws them in
@@ -317,41 +341,44 @@ static inline void PgxpFillVertex(GrVertex* v, const void* addr, int rawX, int r
 	 *    since the shader scales position by W that warped them into spikes.
 	 *    Closest-(x,y) stays as the fallback for any emit site whose park order
 	 *    doesn't line up with the draw order (slot coord would then fail Accept). */
-	if (s_curPgxpN)
+	else if (s_curPgxpN)
 	{
 		if (slot >= 0 && slot < s_curPgxpN && s_curPgxp[slot].w >= 0.0f &&
 		    PgxpAccept(s_curPgxp[slot].x, s_curPgxp[slot].y, rawX, rawY))
 		{
-			v->ppx = s_curPgxp[slot].x + ofsX;
-			v->ppy = s_curPgxp[slot].y + ofsY;
-			v->ppw = s_curPgxp[slot].w;
-			s_pgxpDet++;
-			return;
+			hx = s_curPgxp[slot].x + ofsX; hy = s_curPgxp[slot].y + ofsY; hw = s_curPgxp[slot].w; got = 1; s_pgxpDet++;
 		}
-		int best = -1; float bestD = 1e30f;
-		for (int i = 0; i < s_curPgxpN; i++) {
-			if (s_curPgxp[i].w < 0.0f) continue;       /* unresolved slot */
-			float dx = s_curPgxp[i].x - (float)rawX, dy = s_curPgxp[i].y - (float)rawY;
-			float d = dx * dx + dy * dy;
-			if (d < bestD) { bestD = d; best = i; }
-		}
-		if (best >= 0) {
-			if (bestD <= 4.0f) {   /* within 2px -> this vertex's own precise */
-				v->ppx = s_curPgxp[best].x + ofsX;
-				v->ppy = s_curPgxp[best].y + ofsY;
-				v->ppw = s_curPgxp[best].w;
-				s_pgxpDet++;
-				return;
+		else
+		{
+			int best = -1; float bestD = 1e30f;
+			for (int i = 0; i < s_curPgxpN; i++) {
+				if (s_curPgxp[i].w < 0.0f) continue;       /* unresolved slot */
+				float dx = s_curPgxp[i].x - (float)rawX, dy = s_curPgxp[i].y - (float)rawY;
+				float d = dx * dx + dy * dy;
+				if (d < bestD) { bestD = d; best = i; }
+			}
+			if (best >= 0 && bestD <= 4.0f) {   /* within 2px -> this vertex's own precise */
+				hx = s_curPgxp[best].x + ofsX; hy = s_curPgxp[best].y + ofsY; hw = s_curPgxp[best].w; got = 1; s_pgxpDet++;
 			}
 		}
 	}
 	/* 3) heuristic (x,y)-key ring — immediate prims, fallback */
-	if (PGXP_LookupHinted(rawX, rawY, hint, &fx, &fy, &fw) && PgxpAccept(fx, fy, rawX, rawY))
+	if (!got && PGXP_LookupHinted(rawX, rawY, hint, &fx, &fy, &fw) && PgxpAccept(fx, fy, rawX, rawY))
 	{
-		v->ppx = fx + ofsX;
-		v->ppy = fy + ofsY;
-		v->ppw = fw;
-		s_pgxpRingHit++;
+		hx = fx + ofsX; hy = fy + ofsY; hw = fw; got = 1; s_pgxpRingHit++;
+	}
+
+	if (got)
+	{
+		/* snap-XY (rigid characters): keep the perspective W so the texture stays
+		 * perspective-correct, but pin the screen position to the affine integer
+		 * coord. Each bone segment is a separate rigid mesh on its own matrix, so
+		 * overlapping joint verts land sub-pixel apart with true precision and show
+		 * a seam; snapping XY back to the pixel grid makes the segments meet exactly
+		 * as they did on PSX while still correcting the texture. */
+		if (s_curPgxpSnapXY) { v->ppx = (float)v->x; v->ppy = (float)v->y; }
+		else                 { v->ppx = hx; v->ppy = hy; }
+		v->ppw = hw;
 	}
 	else
 	{
@@ -440,6 +467,7 @@ extern "C" void PsyX_CaptureGteDepths(void* prim)
 		PgxpPrimStore(prim);
 	}
 	g_primPgxpForceAffine = 0;   /* strictly per-prim, even if the probe was full */
+	g_primPgxpSnapXY = 0;
 
 	uintptr_t key = (uintptr_t)prim;
 	int slot = (int)((key >> 2) & SZ_TABLE_MASK);
@@ -487,7 +515,9 @@ extern "C" void PsyX_ClearGteDepthTable(void)
 	g_primPgxpNextValid = 0;
 	g_primPgxpNextCount = 0;
 	g_primPgxpForceAffine = 0;
+	g_primPgxpSnapXY = 0;
 	s_curPgxpAffine = 0;
+	s_curPgxpSnapXY = 0;
 	s_curPgxp = nullptr;
 	s_curPgxpN = 0;
 }
