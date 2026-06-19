@@ -214,12 +214,26 @@ extern "C" void PsyX_SetNextPrimPgxp(void* a0, void* a1, void* a2, void* a3)
 	g_primPgxpNextValid = 1;
 }
 
+/* Force the NEXT addPrim to render affine (no PGXP). For screen-space prims
+ * (billboards) whose corners are built in screen space and never GTE-projected,
+ * PGXP has no real data for them and only collides them against the ring -
+ * small ones collapse their corners onto their own projected centre (the tree-
+ * foliage "spikes"). Billboards are camera-facing flat quads with no perspective
+ * to correct, so affine is the correct result. Captured per-prim, then cleared. */
+static int g_primPgxpForceAffine = 0;
+extern "C" void PsyX_SetNextPrimAffine(void)
+{
+	if (!g_PsxUsePgxp) return;
+	g_primPgxpForceAffine = 1;
+	g_primPgxpNextValid = 1;   /* make PsyX_CaptureGteDepths park (store) the flag */
+}
+
 /* gen-stamped (like the address map): GsDrawOt clears this table at the START of
  * the draw — AFTER addPrim stored into it but BEFORE DrawOTag reads it — so a
  * plain memset wipes the data before use. Stamping each entry with the frame
  * generation lets the parked set survive that mistimed clear: store and draw
  * happen in the same frame (same gen), and next frame's entries are rejected. */
-struct PgxpPrimEntry { uintptr_t key; unsigned gen; int n; PgxpVtx v[4]; };
+struct PgxpPrimEntry { uintptr_t key; unsigned gen; int n; int affine; PgxpVtx v[4]; };
 #define PGXP_PRIM_BITS 13
 #define PGXP_PRIM_SIZE (1 << PGXP_PRIM_BITS)
 #define PGXP_PRIM_MASK (PGXP_PRIM_SIZE - 1)
@@ -233,6 +247,7 @@ static void PgxpPrimStore(const void* prim)
 		PgxpPrimEntry* e = &g_pgxpPrimTable[(s + i) & PGXP_PRIM_MASK];
 		if (e->key == key || e->key == 0 || e->gen != s_pgxpGen) {
 			e->key = key; e->gen = s_pgxpGen; e->n = g_primPgxpNextCount;
+			e->affine = g_primPgxpForceAffine;
 			for (int j = 0; j < g_primPgxpNextCount; j++) e->v[j] = g_primPgxpNext[j];
 			return;
 		}
@@ -241,16 +256,17 @@ static void PgxpPrimStore(const void* prim)
 
 static const PgxpVtx* s_curPgxp = nullptr;
 static int s_curPgxpN = 0;
+static int s_curPgxpAffine = 0;
 
 static void PGXP_BeginPrim(const void* prim)
 {
-	s_curPgxp = nullptr; s_curPgxpN = 0;
+	s_curPgxp = nullptr; s_curPgxpN = 0; s_curPgxpAffine = 0;
 	uintptr_t key = (uintptr_t)prim;
 	unsigned s = (unsigned)((key >> 2) * 2654435761u) & PGXP_PRIM_MASK;
 	for (int i = 0; i < 16; i++) {
 		const PgxpPrimEntry* e = &g_pgxpPrimTable[(s + i) & PGXP_PRIM_MASK];
 		if (e->key == key) {
-			if (e->gen == s_pgxpGen) { s_curPgxp = e->v; s_curPgxpN = e->n; }
+			if (e->gen == s_pgxpGen) { s_curPgxp = e->v; s_curPgxpN = e->n; s_curPgxpAffine = e->affine; }
 			return;
 		}
 		if (e->key == 0) return;
@@ -273,6 +289,16 @@ static inline bool PgxpAccept(float fx, float fy, int rawX, int rawY)
 static inline void PgxpFillVertex(GrVertex* v, const void* addr, int rawX, int rawY, float ofsX, float ofsY, unsigned short hint, int slot)
 {
 	float fx, fy, fw;
+	/* 0) prim explicitly marked affine (billboards): screen-space corners have no
+	 *    GTE projection to match, so force the affine path instead of a ring collision. */
+	if (s_curPgxpAffine)
+	{
+		v->ppx = (float)v->x;
+		v->ppy = (float)v->y;
+		v->ppw = 0.0f;
+		s_pgxpMiss++;
+		return;
+	}
 	/* 1) deterministic by prim-field address: direct-to-prim geometry
 	 *    (effect quads via gte_stsxy3_g3, character models via libgs_stub) */
 	if (PGXP_MapGet((void*)addr, &fx, &fy, &fw) && PgxpAccept(fx, fy, rawX, rawY))
@@ -413,6 +439,7 @@ extern "C" void PsyX_CaptureGteDepths(void* prim)
 	if (g_primPgxpNextValid) {
 		PgxpPrimStore(prim);
 	}
+	g_primPgxpForceAffine = 0;   /* strictly per-prim, even if the probe was full */
 
 	uintptr_t key = (uintptr_t)prim;
 	int slot = (int)((key >> 2) & SZ_TABLE_MASK);
@@ -459,6 +486,8 @@ extern "C" void PsyX_ClearGteDepthTable(void)
 	 * would wipe the current frame's parked verts before use. */
 	g_primPgxpNextValid = 0;
 	g_primPgxpNextCount = 0;
+	g_primPgxpForceAffine = 0;
+	s_curPgxpAffine = 0;
 	s_curPgxp = nullptr;
 	s_curPgxpN = 0;
 }

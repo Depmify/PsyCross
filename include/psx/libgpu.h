@@ -227,6 +227,11 @@ extern void PsyX_SetNextPrimSz(unsigned short s0, unsigned short s1, unsigned sh
  * parks them per-prim. Pass NULL for an unused 4th vertex (triangles).
  * No-op when PGXP is off. */
 extern void PsyX_SetNextPrimPgxp(void* a0, void* a1, void* a2, void* a3);
+/* PGXP: force the next prim to render affine (no perspective correction).
+ * For screen-space prims (billboards) whose corners are NOT GTE-projected, so
+ * PGXP has no real data for them and would collide them against the ring -
+ * collapsing/warping them. No-op when PGXP is off. */
+extern void PsyX_SetNextPrimAffine(void);
 /* PGXP: record addr->precise from the gte_stsxy* store macros. Internal. */
 extern void PGXP_StoreAddr(void* addr, int slot);
 #ifdef __cplusplus
