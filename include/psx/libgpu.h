@@ -220,31 +220,10 @@ extern void PsyX_ClearGteDepthTable(void);
  * system the polygon's true per-vertex GTE SZ values before addPrim, since
  * the GTE SZ FIFO is stale at addPrim time (transforms ran earlier in bulk). */
 extern void PsyX_SetNextPrimSz(unsigned short s0, unsigned short s1, unsigned short s2, unsigned short s3, int arg3);
-/* PGXP deterministic coverage: world-geometry renderers call this right next
- * to PsyX_SetNextPrimSz, passing the addresses of the scratch screen-coord
- * entries (screenXy_0[idx]) the next prim's vertices were copied from. PsyX
- * resolves them to the precise GTE projection recorded at gte_stsxy* time and
- * parks them per-prim. Pass NULL for an unused 4th vertex (triangles).
- * No-op when PGXP is off. */
-extern void PsyX_SetNextPrimPgxp(void* a0, void* a1, void* a2, void* a3);
 /* PGXP: force the next prim to render affine (no perspective correction).
  * For screen-space prims (billboards) whose corners are NOT GTE-projected, so
- * PGXP has no real data for them and would collide them against the ring -
- * collapsing/warping them. No-op when PGXP is off. */
+ * the shadow lookup has no real data for them. No-op when PGXP is off. */
 extern void PsyX_SetNextPrimAffine(void);
-/* PGXP: keep the next prim's perspective W (texture correction) but pin each
- * vertex to the affine integer screen position. For rigid segmented meshes
- * (character bones) so adjacent segments' joint verts stop showing a sub-pixel
- * seam, without losing texture perspective. No-op when PGXP is off. */
-extern void PsyX_SetNextPrimSnapXY(void);
-/* PGXP: while on, every bridged prim is flagged snap-XY (see above). Bracket the
- * character bone-draw loop so all rigid segments snap to the pixel grid (no joint
- * seams) without touching the shared mesh drawer's emit sites. No-op when PGXP off. */
-extern void PsyX_SetPgxpSnapMode(int on);
-/* PGXP: bump the bone index within a character draw so the vertex weld only fuses
- * verts from different bones (real joints), not dense same-bone detail (faces).
- * Call once per bone mesh inside the PsyX_SetPgxpSnapMode bracket. No-op off. */
-extern void PsyX_PgxpNextBone(void);
 /* PGXP: record addr->precise from the gte_stsxy* store macros. Internal. */
 extern void PGXP_StoreAddr(void* addr, int slot);
 /* PGXP shadow propagation: after a drawer copies a vertex word from a GTE scratch

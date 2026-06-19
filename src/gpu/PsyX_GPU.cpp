@@ -192,21 +192,6 @@ static bool AffineGet(const void* prim) {
 	return false;
 }
 
-/* Stubs kept so the game drawers still link through Steps 1-4; the call sites and
- * these stubs are removed in Step 6. The copy propagation that replaces
- * PsyX_SetNextPrimPgxp is done at the drawer copy sites via Shadow_Copy. */
-extern "C" void PsyX_SetNextPrimPgxp(void* a0, void* a1, void* a2, void* a3) { (void)a0; (void)a1; (void)a2; (void)a3; }
-extern "C" void PsyX_SetNextPrimSnapXY(void) {}
-extern "C" void PsyX_SetPgxpSnapMode(int on) { (void)on; }
-extern "C" void PsyX_PgxpNextBone(void) {}
-
-/* Console-tunable globals retained until Step 6 removes the WELD/CHARTEX/CHARSNAP
- * console commands; no effect under the shadow-memory model. */
-float g_pgxpWeldDistPx = 0.0f;
-float g_pgxpWeldWRatio = 1.30f;
-int   g_pgxpCharPersp  = 1;
-int   g_pgxpCharSnap   = 0;
-
 static bool s_curPgxpAffine = false;
 static void PGXP_BeginPrim(const void* prim) { s_curPgxpAffine = AffineGet(prim); }
 
