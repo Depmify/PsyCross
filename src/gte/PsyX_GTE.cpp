@@ -11,36 +11,6 @@
 
 GTERegisters gteRegs;
 
-/* PGXP-independent precise backface test for the GS TMD drawer (inventory items).
- * The library's gte_NormalClip culls on the rounded 16-bit screen coords, which
- * flip sign on near-edge-on faces as the item rotates -> faces vanish and you see
- * the inside through the model (e.g. the bottle neck through the cap). Re-project
- * the 3 model-space verts through the live GTE matrix in floating point (same
- * formula as the PGXP path) and test the cross product, so the cull decision is
- * sub-pixel accurate. v = {vx,vy,vz}. intNcl = the integer NormalClip result,
- * used as a fallback when a vertex is at/behind the near plane. Returns 1 =
- * backface (cull), 0 = frontface (keep). */
-extern "C" int PsyX_TriBackfaceF(const short* v0, const short* v1, const short* v2, int intNcl)
-{
-	const short* vv[3] = { v0, v1, v2 };
-	double sx[3], sy[3];
-	int i;
-	for (i = 0; i < 3; i++) {
-		double mac1 = (double)((long long)C2_TRX << 12) + (double)C2_R11 * vv[i][0] + (double)C2_R12 * vv[i][1] + (double)C2_R13 * vv[i][2];
-		double mac2 = (double)((long long)C2_TRY << 12) + (double)C2_R21 * vv[i][0] + (double)C2_R22 * vv[i][1] + (double)C2_R23 * vv[i][2];
-		double mac3 = (double)((long long)C2_TRZ << 12) + (double)C2_R31 * vv[i][0] + (double)C2_R32 * vv[i][1] + (double)C2_R33 * vv[i][2];
-		double sz3 = mac3 / 4096.0;
-		if (sz3 < 1.0) return intNcl <= 0 ? 1 : 0;
-		double ratio = (double)C2_H / sz3;
-		sx[i] = (double)C2_OFX / 65536.0 + (mac1 / 4096.0) * ratio;
-		sy[i] = (double)C2_OFY / 65536.0 + (mac2 / 4096.0) * ratio;
-	}
-	{
-		double ncl = (sx[1] - sx[0]) * (sy[2] - sy[0]) - (sx[2] - sx[0]) * (sy[1] - sy[0]);
-		return ncl <= 0.0 ? 1 : 0;
-	}
-}
-
 #define GTE_SF(op)			((op >> 19) & 1)
 #define GTE_MX(op)			((op >> 17) & 3)
 #define GTE_V(op)			((op >> 15) & 3)
@@ -309,50 +279,7 @@ int Lm_H(long long value, int sf) {
 	return value_12;
 }
 
-/* Centroid OT sort key for the GS TMD drawer. The library computed otz from a
- * SINGLE vertex's depth cue (gte_stdp = the last vertex), so a large face (a box
- * side) mis-sorts against a protruding part (an antenna) as the item rotates ->
- * you see the inside through it. Recompute the cue from the AVERAGE view-space
- * depth of the 3 verts, through the exact GTE cue path (gte_divide / Lm_E / F /
- * Lm_H with the live DQA/DQB/H), so the key's scale + polarity match the original
- * but the face is sorted by its real center. v = {vx,vy,vz}. */
-extern "C" long PsyX_OtzCentroid(const short* v0, const short* v1, const short* v2, int shift)
-{
-	const short* vv[3] = { v0, v1, v2 };
-	long long szsum = 0;
-	int i, h_over_sz3;
-	unsigned short szc;
-	for (i = 0; i < 3; i++) {
-		long long mac3 = ((long long)C2_TRZ << 12) + (long long)C2_R31 * vv[i][0] + (long long)C2_R32 * vv[i][1] + (long long)C2_R33 * vv[i][2];
-		long long sz = mac3 >> 12;
-		if (sz < 1) sz = 1; else if (sz > 0xffff) sz = 0xffff;
-		szsum += sz;
-	}
-	szc = (unsigned short)(szsum / 3);
-	if (szc < 1) szc = 1;
-	h_over_sz3 = Lm_E(gte_divide((unsigned short)C2_H, szc));
-	C2_MAC0 = int(F((long long)C2_DQB + ((long long)C2_DQA * h_over_sz3)));
-	return (long)Lm_H(m_mac0, 1) >> shift;
-}
 
-/* Per-vertex view-space SZ for the GS TMD drawer, same math as PsyX_OtzCentroid
- * but returning the raw SZ values. The GS drawer feeds these to PsyX_SetNextPrimSz
- * before addPrim so each item face gets a true per-prim depth (g_szTable ->
- * ApplyGtePerVertexDepth -> vertex z), which lets the GL depth test resolve an
- * antenna face vs a body face that share one coarse OT bucket. Recomputed from
- * the live rotation matrix so it's immune to the NormalClip GTE-register clobber.
- * v = {vx,vy,vz}; for a triangle pass v3 == v2. */
-extern "C" void PsyX_PrimSz4(const short* v0, const short* v1, const short* v2, const short* v3, unsigned short out[4])
-{
-	const short* vv[4] = { v0, v1, v2, v3 };
-	int i;
-	for (i = 0; i < 4; i++) {
-		long long mac3 = ((long long)C2_TRZ << 12) + (long long)C2_R31 * vv[i][0] + (long long)C2_R32 * vv[i][1] + (long long)C2_R33 * vv[i][2];
-		long long sz = mac3 >> 12;
-		if (sz < 1) sz = 1; else if (sz > 0xffff) sz = 0xffff;
-		out[i] = (unsigned short)sz;
-	}
-}
 
 /* PGXP precise screen-coord FIFO, mirrors the GTE SXY0/SXY1/SXY2 FIFO so the
  * store macros can resolve a destination address to the precise float coord

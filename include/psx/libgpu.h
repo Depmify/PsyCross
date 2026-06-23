@@ -220,9 +220,6 @@ extern void PsyX_ClearGteDepthTable(void);
  * system the polygon's true per-vertex GTE SZ values before addPrim, since
  * the GTE SZ FIFO is stale at addPrim time (transforms ran earlier in bulk). */
 extern void PsyX_SetNextPrimSz(unsigned short s0, unsigned short s1, unsigned short s2, unsigned short s3, int arg3);
-/* Unquantized variant — for small-depth items where 64-step quantization would
- * merge overlapping faces and re-expose the inventory see-through. */
-extern void PsyX_SetNextPrimSzExact(unsigned short s0, unsigned short s1, unsigned short s2, unsigned short s3);
 /* PGXP: force the next prim to render affine (no perspective correction).
  * For screen-space prims (billboards) whose corners are NOT GTE-projected, so
  * the shadow lookup has no real data for them. No-op when PGXP is off. */

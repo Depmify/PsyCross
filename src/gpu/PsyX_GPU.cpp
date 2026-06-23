@@ -386,21 +386,6 @@ extern "C" void PsyX_SetNextPrimSz(unsigned short s0, unsigned short s1, unsigne
 	g_primSzNextValid = 1;
 }
 
-/* Like PsyX_SetNextPrimSz but WITHOUT the 64-unit quantization, for small-depth
- * inventory items whose overlapping faces (radio antenna vs body) differ by only
- * a SZ unit or two — quantizing would merge them back to one depth and re-expose
- * the see-through. World geometry keeps the quantized path (z-fight suppression). */
-extern "C" void PsyX_SetNextPrimSzExact(unsigned short s0, unsigned short s1, unsigned short s2, unsigned short s3)
-{
-	uint16_t avg = (uint16_t)(((unsigned)s0 + s1 + s2 + s3) >> 2);
-	uint32_t mx = s0 > s1 ? s0 : s1;
-	if (s2 > mx) mx = s2;
-	if (s3 > mx) mx = s3;
-	if (mx > g_szMaxThisFrame) g_szMaxThisFrame = mx;
-	g_primSzNext[0] = g_primSzNext[1] = g_primSzNext[2] = g_primSzNext[3] = avg;
-	g_primSzNextValid = 1;
-}
-
 extern "C" void PsyX_CaptureGteDepths(void* prim)
 {
 	/* PGXP: if the next prim was flagged screen-space (billboards), record it so
@@ -444,18 +429,11 @@ extern "C" void PsyX_CaptureGteDepths(void* prim)
 	g_szTable[slot].sz[2] = s2; g_szTable[slot].sz[3] = s3;
 }
 
-extern "C" int g_forceItemDepth;  /* defined in PsyX_render.cpp */
-
 extern "C" void PsyX_ClearGteDepthTable(void)
 {
 	g_szMaxPrevFrame = g_szMaxThisFrame;
 	g_szMaxThisFrame = 0;
-	/* Don't wipe the per-prim depth table during the item pass: the inventory's
-	 * entries were filled in the GsSortObject4J sort (which ran before this, at
-	 * GsDrawOt start), so a memset here would discard them before DrawOTag /
-	 * ApplyGtePerVertexDepth read them — defeating the item see-through fix. */
-	if (!g_forceItemDepth)
-		memset(g_szTable, 0, sizeof(g_szTable));
+	memset(g_szTable, 0, sizeof(g_szTable));
 	g_primSzNextValid = 0;
 	/* s_shadow / s_affine are gen-stamped, NOT cleared here: this runs at the start
 	 * of GsDrawOt, after addPrim filled them but before DrawOTag reads them, so a
