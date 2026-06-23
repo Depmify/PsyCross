@@ -986,15 +986,8 @@ void PsyX_Sys_DoDebugKeys(int nKey, char down)
 	if (g_dbg_gameDebugKeys)
 		g_dbg_gameDebugKeys(nKey, down);
 
-#if 1 //def _DEBUG
-	if (nKey == SDL_SCANCODE_BACKSPACE)
-	{
-		if (down)
-			g_skipSwapInterval = 1;
-		else
-			g_skipSwapInterval = 0;
-	}
-#endif
+	/* Backspace fast-forward (g_skipSwapInterval) removed — it was unguarded and
+	 * trivially hit by accident, silently running the game at uncapped speed. */
 
 	if (!down)
 	{
@@ -1032,16 +1025,9 @@ void PsyX_Sys_DoDebugKeys(int nKey, char down)
 			g_cfg_bilinearFiltering ^= 1;
 			eprintwarn("filtering mode: %d\n", g_cfg_bilinearFiltering);
 			break;
-		case SDL_SCANCODE_F4:
-
-			g_activeKeyboardControllers++;
-			g_activeKeyboardControllers = g_activeKeyboardControllers % 4;
-
-			if (g_activeKeyboardControllers == 0)
-				g_activeKeyboardControllers++;
-
-			eprintwarn("Active keyboard controller: %d\n", g_activeKeyboardControllers);
-			break;
+		/* F4 keyboard-controller-slot cycle removed — a stray tap moved keyboard +
+		 * mouse input off player 1, silently killing fire/aim (read as a gameplay
+		 * bug). g_activeKeyboardControllers stays at its 0x1 default. */
 		case SDL_SCANCODE_F5:
 			g_cfg_pgxpTextureCorrection ^= 1;
 			break;
