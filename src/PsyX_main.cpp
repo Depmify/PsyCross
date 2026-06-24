@@ -53,6 +53,7 @@ int							g_cfg_swapInterval = 0;
 PsyXKeyboardMapping			g_cfg_keyboardMapping;
 PsyXKeyboardMapping			g_cfg_keyboardMapping2 = {0};	/* secondary binds; 0 = SDL_SCANCODE_UNKNOWN (unset) */
 PsyXControllerMapping		g_cfg_controllerMapping;
+PsyXControllerMapping		g_cfg_controllerMapping2;	/* secondary controller binds; all fields BUTTON_INVALID (unset) until configured */
 int							g_cfg_allowMouseSecondary = 0;
 unsigned short				g_cfg_mouseButtonMask[8] = {0};	/* [SDL button 1..5] -> PSX button bitmask */
 GameOnTextInputHandler		g_cfg_gameOnTextInput = NULL;
@@ -302,6 +303,11 @@ static void PsyX_Sys_InitialiseInput()
 	g_cfg_controllerMapping.gc_axis_left_y = SDL_CONTROLLER_AXIS_LEFTY | CONTROLLER_MAP_FLAG_AXIS;
 	g_cfg_controllerMapping.gc_axis_right_x = SDL_CONTROLLER_AXIS_RIGHTX | CONTROLLER_MAP_FLAG_AXIS;
 	g_cfg_controllerMapping.gc_axis_right_y = SDL_CONTROLLER_AXIS_RIGHTY | CONTROLLER_MAP_FLAG_AXIS;
+
+	/* Secondary controller binds default to all-unset (every field
+	 * SDL_CONTROLLER_BUTTON_INVALID == -1). The game's Pc_ApplyControlConfig sets
+	 * the action buttons it wants; anything left here reads as "not pressed". */
+	memset(&g_cfg_controllerMapping2, 0xFF, sizeof(g_cfg_controllerMapping2));
 
 	PsyX_Pad_InitSystem();
 }

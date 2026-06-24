@@ -50,6 +50,7 @@ extern "C" {
 
 /* Mapped inputs */
 extern PsyXControllerMapping		g_cfg_controllerMapping;
+extern PsyXControllerMapping		g_cfg_controllerMapping2;	/* PC: secondary controller binds (second button per action, AND-combined) */
 extern PsyXKeyboardMapping			g_cfg_keyboardMapping;
 extern PsyXKeyboardMapping			g_cfg_keyboardMapping2;		/* PC: secondary keyboard binds (active w/ allow_mouse_secondary) */
 extern int							g_cfg_controllerToSlotMapping[2];

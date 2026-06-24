@@ -262,6 +262,8 @@ void PsyX_Pad_InternalPadUpdates()
 }
 
 
+int GetControllerButtonState(SDL_GameController* cont, int buttonOrAxis); /* defined below */
+
 extern "C" int PsyX_Pad_SkipButtonHeld(void)
 {
 	for (int i = 0; i < MAX_CONTROLLERS; i++)
@@ -270,8 +272,12 @@ extern "C" int PsyX_Pad_SkipButtonHeld(void)
 		if (!gc)
 			continue;
 
-		if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_A) ||
-		    SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_START))
+		/* Route the FMV/blocking-loop "skip" through the configured Action/Start
+		 * binds (primary + alternate) instead of hardcoded A/Start, so a rebound
+		 * controller still skips. */
+		if (GetControllerButtonState(gc, g_cfg_controllerMapping.gc_cross)  > 16384 ||
+		    GetControllerButtonState(gc, g_cfg_controllerMapping2.gc_cross) > 16384 ||
+		    GetControllerButtonState(gc, g_cfg_controllerMapping.gc_start)  > 16384)
 			return 1;
 	}
 
@@ -293,10 +299,33 @@ int GetControllerButtonState(SDL_GameController* cont, int buttonOrAxis)
 	return SDL_GameControllerGetButton(cont, (SDL_GameControllerButton)buttonOrAxis) * 32767;
 }
 
+/* Build the active-low 16-bit PSX button word from one controller mapping. */
+static u_short PsyX_Pad_BuildPadWord(SDL_GameController* cont, const PsyXControllerMapping& mapping)
+{
+	u_short ret = 0xFFFF;
+	if (GetControllerButtonState(cont, mapping.gc_square)     > 16384) ret &= ~0x8000; //Square
+	if (GetControllerButtonState(cont, mapping.gc_circle)     > 16384) ret &= ~0x2000; //Circle
+	if (GetControllerButtonState(cont, mapping.gc_triangle)   > 16384) ret &= ~0x1000; //Triangle
+	if (GetControllerButtonState(cont, mapping.gc_cross)      > 16384) ret &= ~0x4000; //Cross
+	if (GetControllerButtonState(cont, mapping.gc_l1)         > 16384) ret &= ~0x400;  //L1
+	if (GetControllerButtonState(cont, mapping.gc_r1)         > 16384) ret &= ~0x800;  //R1
+	if (GetControllerButtonState(cont, mapping.gc_l2)         > 16384) ret &= ~0x100;  //L2
+	if (GetControllerButtonState(cont, mapping.gc_r2)         > 16384) ret &= ~0x200;  //R2
+	if (GetControllerButtonState(cont, mapping.gc_dpad_up)    > 16384) ret &= ~0x10;   //UP
+	if (GetControllerButtonState(cont, mapping.gc_dpad_down)  > 16384) ret &= ~0x40;   //DOWN
+	if (GetControllerButtonState(cont, mapping.gc_dpad_left)  > 16384) ret &= ~0x80;   //LEFT
+	if (GetControllerButtonState(cont, mapping.gc_dpad_right) > 16384) ret &= ~0x20;   //RIGHT
+	if (GetControllerButtonState(cont, mapping.gc_l3)         > 16384) ret &= ~0x2;    //L3
+	if (GetControllerButtonState(cont, mapping.gc_r3)         > 16384) ret &= ~0x4;    //R3
+	if (GetControllerButtonState(cont, mapping.gc_select)     > 16384) ret &= ~0x1;    //SELECT
+	if (GetControllerButtonState(cont, mapping.gc_start)      > 16384) ret &= ~0x8;    //START
+	return ret;
+}
+
 void PsyX_Pad_UpdateGameControllerInput(SDL_GameController* cont, LPPADRAW pad)
 {
 	short leftX, leftY, rightX, rightY;
-	u_short ret = 0xFFFF;
+	u_short ret;
 
 	if (!cont)
 	{
@@ -305,66 +334,21 @@ void PsyX_Pad_UpdateGameControllerInput(SDL_GameController* cont, LPPADRAW pad)
 		pad->analog[2] = 127;
 		pad->analog[3] = 127;
 
-		*(u_short*)pad->buttons = ret;
+		*(u_short*)pad->buttons = 0xFFFF;
 		return;
 	}
 
-	// TODOL separate mapping for Pad 2
-	const PsyXControllerMapping& mapping = g_cfg_controllerMapping;
+	/* Primary binds AND the secondary (second-button-per-action) binds: active-low,
+	 * so an action reads pressed if EITHER mapping clears its bit. Analog sticks come
+	 * from the primary mapping's axes only. */
+	ret  = PsyX_Pad_BuildPadWord(cont, g_cfg_controllerMapping);
+	ret &= PsyX_Pad_BuildPadWord(cont, g_cfg_controllerMapping2);
 
-	if (GetControllerButtonState(cont, mapping.gc_square) > 16384)//Square
-		ret &= ~0x8000;
+	leftX = GetControllerButtonState(cont, g_cfg_controllerMapping.gc_axis_left_x);
+	leftY = GetControllerButtonState(cont, g_cfg_controllerMapping.gc_axis_left_y);
 
-	if (GetControllerButtonState(cont, mapping.gc_circle) > 16384)//Circle
-		ret &= ~0x2000;
-
-	if (GetControllerButtonState(cont, mapping.gc_triangle) > 16384)//Triangle
-		ret &= ~0x1000;
-
-	if (GetControllerButtonState(cont, mapping.gc_cross) > 16384)//Cross
-		ret &= ~0x4000;
-
-	if (GetControllerButtonState(cont, mapping.gc_l1) > 16384)//L1
-		ret &= ~0x400;
-
-	if (GetControllerButtonState(cont, mapping.gc_r1) > 16384)//R1
-		ret &= ~0x800;
-
-	if (GetControllerButtonState(cont, mapping.gc_l2) > 16384)//L2
-		ret &= ~0x100;
-
-	if (GetControllerButtonState(cont, mapping.gc_r2) > 16384)//R2
-		ret &= ~0x200;
-
-	if (GetControllerButtonState(cont, mapping.gc_dpad_up) > 16384)//UP
-		ret &= ~0x10;
-
-	if (GetControllerButtonState(cont, mapping.gc_dpad_down) > 16384)//DOWN
-		ret &= ~0x40;
-
-	if (GetControllerButtonState(cont, mapping.gc_dpad_left) > 16384)//LEFT
-		ret &= ~0x80;
-
-	if (GetControllerButtonState(cont, mapping.gc_dpad_right) > 16384)//RIGHT
-		ret &= ~0x20;
-
-	if (GetControllerButtonState(cont, mapping.gc_l3) > 16384)//L3
-		ret &= ~0x2;
-
-	if (GetControllerButtonState(cont, mapping.gc_r3) > 16384)//R3
-		ret &= ~0x4;
-
-	if (GetControllerButtonState(cont, mapping.gc_select) > 16384)//SELECT
-		ret &= ~0x1;
-
-	if (GetControllerButtonState(cont, mapping.gc_start) > 16384)//START
-		ret &= ~0x8;
-
-	leftX = GetControllerButtonState(cont, mapping.gc_axis_left_x);
-	leftY = GetControllerButtonState(cont, mapping.gc_axis_left_y);
-
-	rightX = GetControllerButtonState(cont, mapping.gc_axis_right_x);
-	rightY = GetControllerButtonState(cont, mapping.gc_axis_right_y);
+	rightX = GetControllerButtonState(cont, g_cfg_controllerMapping.gc_axis_right_x);
+	rightY = GetControllerButtonState(cont, g_cfg_controllerMapping.gc_axis_right_y);
 
 	*(u_short*)pad->buttons = ret;
 
