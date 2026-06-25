@@ -14,6 +14,12 @@ set_source_files_properties( ${PSYCROSS_SRCS_CPP} PROPERTIES LANGUAGE CXX)
 set_source_files_properties( ${PSYCROSS_SRCS_C} PROPERTIES
     COMPILE_DEFINITIONS "static_assert=_Static_assert"
 )
+
+# AppleClang treats an uppercase .C extension as C++ regardless of the LANGUAGE
+# property. Force C mode explicitly so -std=gnu11 is accepted.
+if(APPLE)
+    set_source_files_properties( ${PSYCROSS_SRCS_C} PROPERTIES COMPILE_FLAGS "-x c")
+endif()
 #set_source_files_properties( "src/gte/PsyX_GTE.cpp" PROPERTIES LANGUAGE C)
 
 add_library(psycross_static STATIC ${PSYCROSS_SRCS_C} ${PSYCROSS_SRCS_CPP})
@@ -58,4 +64,12 @@ else()
     target_link_libraries(psycross_static ${OPENAL_LIBRARY})
     target_include_directories(psycross_static PRIVATE ${OPENAL_INCLUDE_DIR})
 endif()
-target_include_directories(psycross_static PRIVATE ${OpenAL_BINARY_DIR} ${OpenAL_SOURCE_DIR}/include)
+# Guard against an empty OpenAL_SOURCE_DIR (e.g. macOS Homebrew / system
+# framework, where find_package uses the imported target, not an in-tree build)
+# expanding to a bogus "/include" path.
+if(OpenAL_SOURCE_DIR)
+    target_include_directories(psycross_static PRIVATE ${OpenAL_BINARY_DIR} ${OpenAL_SOURCE_DIR}/include)
+endif()
+if(OPENAL_INCLUDE_DIR)
+    target_include_directories(psycross_static PRIVATE ${OPENAL_INCLUDE_DIR})
+endif()
