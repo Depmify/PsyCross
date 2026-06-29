@@ -263,11 +263,11 @@ static void PsyX_Sys_InitialiseInput()
 	 * shift keys mirror cleanly. */
 	g_cfg_keyboardMapping.kc_l1 = SDL_SCANCODE_A;            /* sidestep left */
 	g_cfg_keyboardMapping.kc_l2 = SDL_SCANCODE_RSHIFT;       /* view */
-	g_cfg_keyboardMapping.kc_l3 = SDL_SCANCODE_LEFTBRACKET;
+	g_cfg_keyboardMapping.kc_l3 = SDL_SCANCODE_UNKNOWN  /* [ reserved for effect-intensity control */;
 
 	g_cfg_keyboardMapping.kc_r1 = SDL_SCANCODE_D;            /* sidestep right */
 	g_cfg_keyboardMapping.kc_r2 = SDL_SCANCODE_LSHIFT;       /* aim */
-	g_cfg_keyboardMapping.kc_r3 = SDL_SCANCODE_RIGHTBRACKET;
+	g_cfg_keyboardMapping.kc_r3 = SDL_SCANCODE_UNKNOWN /* ] reserved for effect-intensity control */;
 
 	g_cfg_keyboardMapping.kc_dpad_up = SDL_SCANCODE_UP;
 	g_cfg_keyboardMapping.kc_dpad_down = SDL_SCANCODE_DOWN;
