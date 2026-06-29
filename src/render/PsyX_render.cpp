@@ -202,7 +202,7 @@ int g_PsyX_UsePerPixelFlashlight = 0;
 int   g_PsyX_FlashlightActive   = 0;
 float g_PsyX_FlashlightPos[3]   = { 0.0f, 0.0f, 0.0f };
 float g_PsyX_FlashlightDir[3]   = { 0.0f, 0.0f, 1.0f };
-float g_PsyX_FlashlightColor[3] = { 1.0f, 0.95f, 0.85f };
+float g_PsyX_FlashlightColor[3] = { 0.85f, 0.80f, 0.72f };  /* warm white, slightly under 1.0 so the screen-blend hotspot reads bright without clipping to pure white */
 float g_PsyX_FlashlightInnerCos = 0.94f;  /* ~20 deg */
 float g_PsyX_FlashlightOuterCos = 0.82f;  /* ~35 deg */
 float g_PsyX_FlashlightRange    = 4000.0f;
@@ -983,7 +983,7 @@ int g_PsxFogToBlack = 0;
 	"		else\n"\
 	"			fragColor = NearestTextureSample(v_texcoord.xy);\n"\
 	"		fragColor *= v_color;\n"\
-	/* Per-pixel flashlight cone (additive); gated on the uniform AND vsz>0 so untracked verts / 2D prims stay unlit. N.L omitted in v1. */\
+	/* Per-pixel flashlight cone, screen-blended (+= add*(1-base)) so it brightens dark surfaces fully yet rolls off on already-bright ones instead of clipping to white. Gated on the uniform AND vsz>0 so untracked verts / 2D prims stay unlit. N.L omitted in v1. */\
 	"		if (u_flashlightOn > 0 && v_viewpos.z > 0.0) {\n"\
 	"			vec3 P = v_viewpos;\n"\
 	"			vec3 L = u_flLightPos - P;\n"\
@@ -991,7 +991,7 @@ int g_PsxFogToBlack = 0;
 	"			L /= max(d, 0.0001);\n"\
 	"			float cone  = smoothstep(u_flOuterCos, u_flInnerCos, dot(-L, u_flDir));\n"\
 	"			float atten = clamp(1.0 - d / u_flRange, 0.0, 1.0);\n"\
-	"			fragColor.rgb += u_flColor * (cone * atten);\n"\
+	"			fragColor.rgb += (u_flColor * (cone * atten)) * max(vec3(0.0), 1.0 - fragColor.rgb);\n"\
 	"		}\n"\
 	"		float fogAmt = clamp(v_fogAmount * u_fogStrength, 0.0, 1.0);\n"\
 	"		if (u_fogToBlack > 0)\n"\
