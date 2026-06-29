@@ -982,8 +982,9 @@ int g_PsxFogToBlack = 0;
 	"			fragColor = BilinearTextureSample(v_texcoord.xy);\n"\
 	"		else\n"\
 	"			fragColor = NearestTextureSample(v_texcoord.xy);\n"\
+	"		vec3 flAlbedo = fragColor.rgb;\n"\
 	"		fragColor *= v_color;\n"\
-	/* Per-pixel flashlight: spotlight cone * per-fragment Lambert (N.L). GrVertex carries no usable normals, so the surface normal is reconstructed from the view-space position gradient (cross(dFdx,dFdy)) -- v_viewpos is the same proven view-space pos the cone already uses, so this needs no GTE-side normal capture and is exact per triangle face. Derivatives are taken inside the UNIFORM u_flashlightOn branch (never the per-fragment z test) so they stay well-defined. Screen-blended so bright surfaces do not clip to white. */\
+	/* Per-pixel flashlight: spotlight cone * per-fragment Lambert (N.L). GrVertex carries no usable normals, so the surface normal is reconstructed from the view-space position gradient (cross(dFdx,dFdy)) -- v_viewpos is the same proven view-space pos the cone already uses, so this needs no GTE-side normal capture and is exact per triangle face. Derivatives are taken inside the UNIFORM u_flashlightOn branch (never the per-fragment z test) so they stay well-defined. The flashlight term modulates the texture albedo (flAlbedo) and adds to the dimmed base, so lit surfaces keep their texture and N.L shading instead of washing to flat white. */\
 	"		if (u_flashlightOn > 0) {\n"\
 	"			vec3 flP = v_viewpos;\n"\
 	"			vec3 flN = cross(dFdx(flP), dFdy(flP));\n"\
@@ -999,7 +1000,7 @@ int g_PsxFogToBlack = 0;
 	"				float cone  = smoothstep(u_flOuterCos, u_flInnerCos, dot(-L, u_flDir));\n"\
 	"				float atten = clamp(1.0 - d / u_flRange, 0.0, 1.0);\n"\
 	"				vec3 fl = u_flColor * (cone * atten * ndl);\n"\
-	"				fragColor.rgb += fl * max(vec3(0.0), 1.0 - fragColor.rgb);\n"\
+	"				fragColor.rgb += flAlbedo * fl;\n"\
 	"			}\n"\
 	"		}\n"\
 	"		float fogAmt = clamp(v_fogAmount * u_fogStrength, 0.0, 1.0);\n"\
