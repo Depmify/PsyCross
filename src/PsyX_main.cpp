@@ -1119,6 +1119,46 @@ void PsyX_EnableSwapInterval(int enable)
 	g_enableSwapInterval = enable;
 }
 
+void PsyX_ApplyVsync(int vsync)
+{
+	/* Drive vsync through the per-frame swap-interval path (PsyX_BeginScene): a
+	 * direct SDL_GL_SetSwapInterval is overwritten every frame from
+	 * g_cfg_swapInterval, so toggling that gate is what actually sticks. */
+	g_cfg_swapInterval = (vsync != 0) ? 1 : 0;
+	g_swapInterval = 1;
+}
+
+void PsyX_ApplyWindowState(int width, int height, int fullscreen)
+{
+	if (!g_window)
+		return;
+
+	if (fullscreen == 1) /* exclusive fullscreen at the requested resolution */
+	{
+		SDL_DisplayMode mode;
+		if (SDL_GetWindowDisplayMode(g_window, &mode) == 0)
+		{
+			mode.w = width;
+			mode.h = height;
+			SDL_SetWindowDisplayMode(g_window, &mode);
+		}
+		SDL_SetWindowFullscreen(g_window, SDL_WINDOW_FULLSCREEN);
+	}
+	else if (fullscreen == 2) /* borderless = desktop mode, resolution ignored */
+	{
+		SDL_SetWindowFullscreen(g_window, SDL_WINDOW_FULLSCREEN_DESKTOP);
+	}
+	else /* windowed */
+	{
+		SDL_SetWindowFullscreen(g_window, 0);
+		SDL_SetWindowSize(g_window, width, height);
+		SDL_SetWindowPosition(g_window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+	}
+
+	SDL_GetWindowSize(g_window, &g_windowWidth, &g_windowHeight);
+	GR_ResetDevice();
+}
+
 void PsyX_WaitForTimestep(int count)
 {
 #if 0 // defined(RENDERER_OGL) || defined(RENDERER_OGLES)

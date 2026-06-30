@@ -180,6 +180,14 @@ extern void PsyX_EnableSwapInterval(int enable);
 /* Changes swap interval interval interval */
 extern void PsyX_SetSwapInterval(int interval);
 
+/* PC port: apply window mode + resolution at runtime.
+ * fullscreen: 0 = windowed, 1 = exclusive fullscreen, 2 = borderless desktop. */
+extern void PsyX_ApplyWindowState(int width, int height, int fullscreen);
+
+/* PC port: apply vsync at runtime (0 = off, nonzero = on). Routes through the
+ * per-frame swap-interval path so the change persists. */
+extern void PsyX_ApplyVsync(int vsync);
+
 /* 1 while Cross (A) or Start is held on any connected game controller.
  * For blocking loops (FMV playback) that run outside the game's pad
  * polling and otherwise only see the keyboard. */
