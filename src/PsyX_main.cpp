@@ -829,8 +829,12 @@ void PsyX_Sys_DoPollEvent()
 				int wy = event.wheel.y;
 				if (event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED)
 					wy = -wy;
-				if (wy > 0)      g_PsyX_WheelUpFrames   = 3;
-				else if (wy < 0) g_PsyX_WheelDownFrames = 3;
+				/* Latch a scroll notch "active" for ~2 frames. Decayed once per
+				 * frame in PsyX_EndScene (NOT consumed by any one reader) so BOTH
+				 * the pad word AND the graphics-tuning keys (dbg_overlay) can see
+				 * the same scroll without racing to consume it. */
+				if (wy > 0)      g_PsyX_WheelUpFrames   = 2;
+				else if (wy < 0) g_PsyX_WheelDownFrames = 2;
 				break;
 			}
 			case SDL_KEYDOWN:
@@ -970,6 +974,11 @@ void PsyX_EndScene()
 
 	assert(begin_scene_flag);
 	begin_scene_flag = 0;
+
+	/* Decay the mouse-wheel latch once per frame (set in PsyX_Sys_DoPollEvent,
+	 * read by the pad word + the graphics-tuning keys). */
+	if (g_PsyX_WheelUpFrames   > 0) g_PsyX_WheelUpFrames--;
+	if (g_PsyX_WheelDownFrames > 0) g_PsyX_WheelDownFrames--;
 
 	PGXP_CoverageTick();
 

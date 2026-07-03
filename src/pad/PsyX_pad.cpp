@@ -434,19 +434,12 @@ static u_short PsyX_Pad_BuildMouseWord()
 			ret &= ~g_cfg_mouseButtonMask[b];
 	}
 
-	/* Mouse wheel up/down occupy mask slots 6/7 (see Pc_ParseMouseName). Each
-	 * scroll notch latches for a few frames so it reads as a button tap; decay
-	 * the latch as it's consumed. */
-	if (g_PsyX_WheelUpFrames > 0)
-	{
-		if (g_cfg_mouseButtonMask[6]) ret &= ~g_cfg_mouseButtonMask[6];
-		g_PsyX_WheelUpFrames--;
-	}
-	if (g_PsyX_WheelDownFrames > 0)
-	{
-		if (g_cfg_mouseButtonMask[7]) ret &= ~g_cfg_mouseButtonMask[7];
-		g_PsyX_WheelDownFrames--;
-	}
+	/* Mouse wheel up/down occupy mask slots 6/7 (see Pc_ParseMouseName). The
+	 * latch is set on the scroll event and decayed once per frame in
+	 * PsyX_EndScene — read it here (don't consume), so a wheel bound to a PSX
+	 * button AND to the graphics keys both see the same notch. */
+	if (g_PsyX_WheelUpFrames   > 0 && g_cfg_mouseButtonMask[6]) ret &= ~g_cfg_mouseButtonMask[6];
+	if (g_PsyX_WheelDownFrames > 0 && g_cfg_mouseButtonMask[7]) ret &= ~g_cfg_mouseButtonMask[7];
 	return ret;
 }
 
