@@ -95,6 +95,9 @@ extern float						g_PsyX_FlashlightShadowBias;
  * off its surface toward the light before the shadow lookup — kills grazing-angle
  * self-shadow acne on flat surfaces. Tunable via `shadownormal`. */
 extern float						g_PsyX_FlashlightShadowNormalOffset;
+/* How much light a fully-occluded pixel loses (1 = black, 0.5 = soft half-shadow).
+ * Keeps the close point light's oversized clutter umbras subtle. `shadowstrength`. */
+extern float						g_PsyX_FlashlightShadowStrength;
 /* First-person shadow light drop (view-space units) — offsets the shadow light
  * below the eye so FPS shadows aren't self-cancelled by a camera-coincident light. */
 extern float						g_PsyX_FlashlightShadowFpsDrop;

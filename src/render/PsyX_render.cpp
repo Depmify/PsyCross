@@ -211,6 +211,12 @@ float g_PsyX_FlashlightShadowBias = 0.0018f;
  * them — the fixed depth bias alone can't cover the huge texel footprint there.
  * Value ~= texels of offset / shadow-map-size. Tunable via `shadownormal`. */
 float g_PsyX_FlashlightShadowNormalOffset = 0.006f;
+/* How much light a fully-occluded pixel loses: 1.0 = pitch-black shadow (old
+ * behaviour), 0.5 = a soft half-shadow. SH's flashlight is a close point light,
+ * so tiny props throw big hard umbras; keeping this well below 1 makes those
+ * read as gentle darkening instead of solid black slabs. Tunable via
+ * `shadowstrength`. */
+float g_PsyX_FlashlightShadowStrength = 0.5f;
 
 /* PC port: per-frame flashlight cone parameters (view space), set by game code.
  * The shader consumes them only when (g_PsyX_UsePerPixelFlashlight &&
@@ -727,6 +733,7 @@ typedef struct
 	GLint shadowBiasLoc;
 	GLint shadowTexelLoc;
 	GLint shadowNormalOffsetLoc;
+	GLint shadowStrengthLoc;
 #endif
 } GTEShader;
 
@@ -760,6 +767,7 @@ GLint u_shadowMatrixLoc;
 GLint u_shadowBiasLoc;
 GLint u_shadowTexelLoc;
 GLint u_shadowNormalOffsetLoc;
+GLint u_shadowStrengthLoc;
 
 /* Flashlight shadow map (see g_PsyX_UseFlashlightShadows). Depth-only FBO rendered
  * from the light POV each frame; g_shadowLightMatrix maps view space -> light clip.
@@ -1044,6 +1052,7 @@ int g_PsxFogToBlack = 0;
 	"	uniform float u_shadowBias;\n"\
 	"	uniform vec2 u_shadowTexel;\n"\
 	"	uniform float u_shadowNormalOffset;\n"\
+	"	uniform float u_shadowStrength;\n"\
 	"	void main() {\n"\
 	"		if(bilinearFilter > 0 && v_is3d > 0.5)\n"\
 	"			fragColor = BilinearTextureSample(v_texcoord.xy);\n"\
@@ -1079,13 +1088,14 @@ int g_PsxFogToBlack = 0;
 	"						if (luv.x > 0.0 && luv.x < 1.0 && luv.y > 0.0 && luv.y < 1.0 && luv.z < 1.0) {\n"\
 	"							float sbias = u_shadowBias * (1.0 + 3.0 * (1.0 - max(dot(N, L), 0.0)));\n"\
 	"							float occ = 0.0;\n"\
-	"							for (int sy = -1; sy <= 1; sy++) {\n"\
-	"								for (int sx = -1; sx <= 1; sx++) {\n"\
-	"									float sd = texture2D(u_shadowTex, luv.xy + vec2(float(sx), float(sy)) * u_shadowTexel).r;\n"\
+	"							for (int sy = -2; sy <= 2; sy++) {\n"\
+	"								for (int sx = -2; sx <= 2; sx++) {\n"\
+	"									float sd = texture2D(u_shadowTex, luv.xy + vec2(float(sx), float(sy)) * u_shadowTexel * 1.5).r;\n"\
 	"									occ += (luv.z - sbias > sd) ? 1.0 : 0.0;\n"\
 	"								}\n"\
 	"							}\n"\
-	"							shadow = 1.0 - occ / 9.0;\n"\
+	/* u_shadowStrength scales how much light a fully-occluded pixel loses (1 = pitch black as before, 0.5 = a soft half-shadow). 5x5 PCF at 1.5x spread widens the penumbra so the coarse 1024^2 map reads soft, not blocky. */\
+	"							shadow = 1.0 - u_shadowStrength * (occ / 25.0);\n"\
 	"						}\n"\
 	"					}\n"\
 	"				}\n"\
@@ -1399,6 +1409,7 @@ void GR_CompilePSXShader(GTEShader* sh, const char* source)
 	sh->shadowBiasLoc = glGetUniformLocation(sh->shader, "u_shadowBias");
 	sh->shadowTexelLoc = glGetUniformLocation(sh->shader, "u_shadowTexel");
 	sh->shadowNormalOffsetLoc = glGetUniformLocation(sh->shader, "u_shadowNormalOffset");
+	sh->shadowStrengthLoc = glGetUniformLocation(sh->shader, "u_shadowStrength");
 
 	/* Shadow map lives on texture unit 1 (scene textures use unit 0). Bind the
 	 * sampler once here; the depth texture is bound to GL_TEXTURE1 each frame. */
@@ -1727,6 +1738,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_shadowBiasLoc = g_gte_shader_4.shadowBiasLoc;
 		u_shadowTexelLoc = g_gte_shader_4.shadowTexelLoc;
 		u_shadowNormalOffsetLoc = g_gte_shader_4.shadowNormalOffsetLoc;
+		u_shadowStrengthLoc = g_gte_shader_4.shadowStrengthLoc;
 		break;
 	case TF_8_BIT:
 		GR_SetShader(g_gte_shader_8.shader);
@@ -1753,6 +1765,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_shadowBiasLoc = g_gte_shader_8.shadowBiasLoc;
 		u_shadowTexelLoc = g_gte_shader_8.shadowTexelLoc;
 		u_shadowNormalOffsetLoc = g_gte_shader_8.shadowNormalOffsetLoc;
+		u_shadowStrengthLoc = g_gte_shader_8.shadowStrengthLoc;
 		break;
 	case TF_16_BIT:
 		GR_SetShader(g_gte_shader_16.shader);
@@ -1779,6 +1792,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_shadowBiasLoc = g_gte_shader_16.shadowBiasLoc;
 		u_shadowTexelLoc = g_gte_shader_16.shadowTexelLoc;
 		u_shadowNormalOffsetLoc = g_gte_shader_16.shadowNormalOffsetLoc;
+		u_shadowStrengthLoc = g_gte_shader_16.shadowStrengthLoc;
 		break;
 	case TF_32_BIT_RGBA:
 		GR_SetShader(g_gte_shader_32_rgba.shader);
@@ -1805,6 +1819,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_shadowBiasLoc = -1;
 		u_shadowTexelLoc = -1;
 		u_shadowNormalOffsetLoc = -1;
+		u_shadowStrengthLoc = -1;
 		break;
 	}
 
@@ -1883,6 +1898,8 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 				glUniform1f(u_shadowBiasLoc, g_PsyX_FlashlightShadowBias);
 			if (u_shadowNormalOffsetLoc != -1)
 				glUniform1f(u_shadowNormalOffsetLoc, g_PsyX_FlashlightShadowNormalOffset);
+			if (u_shadowStrengthLoc != -1)
+				glUniform1f(u_shadowStrengthLoc, g_PsyX_FlashlightShadowStrength);
 			if (u_shadowTexelLoc != -1)
 				glUniform2f(u_shadowTexelLoc, 1.0f / (float)PSYX_SHADOW_MAP_SIZE, 1.0f / (float)PSYX_SHADOW_MAP_SIZE);
 			glActiveTexture(GL_TEXTURE1);
