@@ -204,6 +204,25 @@ int g_PsyX_UsePerPixelFlashlight = 0;
 int   g_PsyX_UseFlashlightShadows = 0;
 /* Depth-compare bias in light-clip [0,1] space; tunable via `shadowbias` console. */
 float g_PsyX_FlashlightShadowBias = 0.0018f;
+/* Optional shadow-look console tweaks, all DEFAULTING TO NO-OP so the default
+ * render is the plain hard 3x3 shadow (which looks right for monsters). They exist
+ * for live tuning of the prop-shadow "silhouette" look; see the shader.
+ *
+ * Normal-offset (`shadownormal`, 0 = off): push the receiver sample off its surface
+ * toward the light by (this * dist-to-light), more at grazing angles — reduces
+ * self-shadow acne on flat surfaces. */
+float g_PsyX_FlashlightShadowNormalOffset = 0.0f;
+/* How much light a fully-occluded pixel loses (`shadowstrength`): 1.0 = pitch black
+ * (default/original), lower = softer half-shadow. */
+float g_PsyX_FlashlightShadowStrength = 1.0f;
+/* Contact-shadow fade distance in view units (`shadowfade`, 0 = off): when > 0, a
+ * receiver this far BEHIND its occluder gets no shadow, so a prop drops a tight
+ * fading contact shadow instead of a tall silhouette smeared onto the wall. */
+float g_PsyX_FlashlightShadowFadeDist = 0.0f;
+/* The shadow frustum's near/far, published by GR_BuildShadowMatrix so the cone
+ * shader can linearize shadow-map depth for the contact fade above. */
+static float g_shadowZNear = 20.0f;
+static float g_shadowZFar  = 5200.0f;
 
 /* PC port: per-frame flashlight cone parameters (view space), set by game code.
  * The shader consumes them only when (g_PsyX_UsePerPixelFlashlight &&
@@ -719,6 +738,10 @@ typedef struct
 	GLint shadowMatrixLoc;
 	GLint shadowBiasLoc;
 	GLint shadowTexelLoc;
+	GLint shadowNormalOffsetLoc;
+	GLint shadowStrengthLoc;
+	GLint shadowClipLoc;
+	GLint shadowFadeDistLoc;
 #endif
 } GTEShader;
 
@@ -751,6 +774,10 @@ GLint u_shadowOnLoc;
 GLint u_shadowMatrixLoc;
 GLint u_shadowBiasLoc;
 GLint u_shadowTexelLoc;
+GLint u_shadowNormalOffsetLoc;
+GLint u_shadowStrengthLoc;
+GLint u_shadowClipLoc;
+GLint u_shadowFadeDistLoc;
 
 /* Flashlight shadow map (see g_PsyX_UseFlashlightShadows). Depth-only FBO rendered
  * from the light POV each frame; g_shadowLightMatrix maps view space -> light clip.
@@ -1034,6 +1061,15 @@ int g_PsxFogToBlack = 0;
 	"	uniform mat4 u_shadowMatrix;\n"\
 	"	uniform float u_shadowBias;\n"\
 	"	uniform vec2 u_shadowTexel;\n"\
+	"	uniform float u_shadowNormalOffset;\n"\
+	"	uniform float u_shadowStrength;\n"\
+	"	uniform vec2 u_shadowClip;\n"\
+	"	uniform float u_shadowFadeDist;\n"\
+	/* Window depth [0,1] -> linear distance along the light's forward axis, using the shadow frustum's near/far (u_shadowClip). Lets us measure how far a receiver sits BEHIND its occluder in world units. */\
+	"	float shLinDepth(float zw) {\n"\
+	"		float ndc = zw * 2.0 - 1.0;\n"\
+	"		return (2.0 * u_shadowClip.x * u_shadowClip.y) / (u_shadowClip.y + u_shadowClip.x - ndc * (u_shadowClip.y - u_shadowClip.x));\n"\
+	"	}\n"\
 	"	void main() {\n"\
 	"		if(bilinearFilter > 0 && v_is3d > 0.5)\n"\
 	"			fragColor = BilinearTextureSample(v_texcoord.xy);\n"\
@@ -1059,19 +1095,32 @@ int g_PsxFogToBlack = 0;
 	/* Real shadow map: project the view-space fragment into the light's clip space and compare its depth against the nearest occluder the light saw; 3x3 PCF softens the hard 1024^2 edge, and a slope-scaled bias (from N.L) fights acne. Gated on u_shadowOn so the no-shadow path is untouched. */\
 	"				float shadow = 1.0;\n"\
 	"				if (u_shadowOn > 0) {\n"\
-	"					vec4 lp = u_shadowMatrix * vec4(flP, 1.0);\n"\
+	/* Normal-offset: sample the shadow map at a point pushed off the surface toward the light, more so at grazing angles. Removes the self-shadow acne that flat surfaces get when the near-horizontal beam grazes them (the depth bias alone can't span the huge texel footprint there). */\
+	"					vec3 Noff = (dot(N, L) < 0.0) ? -N : N;\n"\
+	"					float graze = 1.0 - max(dot(Noff, L), 0.0);\n"\
+	"					vec3 flPs = flP + Noff * (u_shadowNormalOffset * d * (0.5 + graze));\n"\
+	"					vec4 lp = u_shadowMatrix * vec4(flPs, 1.0);\n"\
 	"					if (lp.w > 0.0) {\n"\
 	"						vec3 luv = lp.xyz / lp.w * 0.5 + 0.5;\n"\
 	"						if (luv.x > 0.0 && luv.x < 1.0 && luv.y > 0.0 && luv.y < 1.0 && luv.z < 1.0) {\n"\
 	"							float sbias = u_shadowBias * (1.0 + 3.0 * (1.0 - max(dot(N, L), 0.0)));\n"\
+	/* Optional console tweaks, all no-ops at their defaults so the shadow is the plain 3x3 PCF hard shadow by default. u_shadowFadeDist > 0 turns on contact fade (weight each occluded sample by how far the receiver sits behind its occluder, so a prop drops a fading contact shadow instead of a tall silhouette); u_shadowStrength < 1 softens how dark a shadow gets; u_shadowNormalOffset > 0 pushes the sample off the surface (see flPs above). */\
+	"							float recvLin = (u_shadowFadeDist > 0.0) ? shLinDepth(luv.z) : 0.0;\n"\
 	"							float occ = 0.0;\n"\
 	"							for (int sy = -1; sy <= 1; sy++) {\n"\
 	"								for (int sx = -1; sx <= 1; sx++) {\n"\
 	"									float sd = texture2D(u_shadowTex, luv.xy + vec2(float(sx), float(sy)) * u_shadowTexel).r;\n"\
-	"									occ += (luv.z - sbias > sd) ? 1.0 : 0.0;\n"\
+	"									if (luv.z - sbias > sd) {\n"\
+	"										if (u_shadowFadeDist > 0.0) {\n"\
+	"											float gap = recvLin - shLinDepth(sd);\n"\
+	"											occ += 1.0 - clamp(gap / u_shadowFadeDist, 0.0, 1.0);\n"\
+	"										} else {\n"\
+	"											occ += 1.0;\n"\
+	"										}\n"\
+	"									}\n"\
 	"								}\n"\
 	"							}\n"\
-	"							shadow = 1.0 - occ / 9.0;\n"\
+	"							shadow = 1.0 - u_shadowStrength * (occ / 9.0);\n"\
 	"						}\n"\
 	"					}\n"\
 	"				}\n"\
@@ -1384,6 +1433,10 @@ void GR_CompilePSXShader(GTEShader* sh, const char* source)
 	sh->shadowMatrixLoc = glGetUniformLocation(sh->shader, "u_shadowMatrix");
 	sh->shadowBiasLoc = glGetUniformLocation(sh->shader, "u_shadowBias");
 	sh->shadowTexelLoc = glGetUniformLocation(sh->shader, "u_shadowTexel");
+	sh->shadowNormalOffsetLoc = glGetUniformLocation(sh->shader, "u_shadowNormalOffset");
+	sh->shadowStrengthLoc = glGetUniformLocation(sh->shader, "u_shadowStrength");
+	sh->shadowClipLoc = glGetUniformLocation(sh->shader, "u_shadowClip");
+	sh->shadowFadeDistLoc = glGetUniformLocation(sh->shader, "u_shadowFadeDist");
 
 	/* Shadow map lives on texture unit 1 (scene textures use unit 0). Bind the
 	 * sampler once here; the depth texture is bound to GL_TEXTURE1 each frame. */
@@ -1711,6 +1764,10 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_shadowMatrixLoc = g_gte_shader_4.shadowMatrixLoc;
 		u_shadowBiasLoc = g_gte_shader_4.shadowBiasLoc;
 		u_shadowTexelLoc = g_gte_shader_4.shadowTexelLoc;
+		u_shadowNormalOffsetLoc = g_gte_shader_4.shadowNormalOffsetLoc;
+		u_shadowStrengthLoc = g_gte_shader_4.shadowStrengthLoc;
+		u_shadowClipLoc = g_gte_shader_4.shadowClipLoc;
+		u_shadowFadeDistLoc = g_gte_shader_4.shadowFadeDistLoc;
 		break;
 	case TF_8_BIT:
 		GR_SetShader(g_gte_shader_8.shader);
@@ -1736,6 +1793,10 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_shadowMatrixLoc = g_gte_shader_8.shadowMatrixLoc;
 		u_shadowBiasLoc = g_gte_shader_8.shadowBiasLoc;
 		u_shadowTexelLoc = g_gte_shader_8.shadowTexelLoc;
+		u_shadowNormalOffsetLoc = g_gte_shader_8.shadowNormalOffsetLoc;
+		u_shadowStrengthLoc = g_gte_shader_8.shadowStrengthLoc;
+		u_shadowClipLoc = g_gte_shader_8.shadowClipLoc;
+		u_shadowFadeDistLoc = g_gte_shader_8.shadowFadeDistLoc;
 		break;
 	case TF_16_BIT:
 		GR_SetShader(g_gte_shader_16.shader);
@@ -1761,6 +1822,10 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_shadowMatrixLoc = g_gte_shader_16.shadowMatrixLoc;
 		u_shadowBiasLoc = g_gte_shader_16.shadowBiasLoc;
 		u_shadowTexelLoc = g_gte_shader_16.shadowTexelLoc;
+		u_shadowNormalOffsetLoc = g_gte_shader_16.shadowNormalOffsetLoc;
+		u_shadowStrengthLoc = g_gte_shader_16.shadowStrengthLoc;
+		u_shadowClipLoc = g_gte_shader_16.shadowClipLoc;
+		u_shadowFadeDistLoc = g_gte_shader_16.shadowFadeDistLoc;
 		break;
 	case TF_32_BIT_RGBA:
 		GR_SetShader(g_gte_shader_32_rgba.shader);
@@ -1786,6 +1851,10 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_shadowMatrixLoc = -1;
 		u_shadowBiasLoc = -1;
 		u_shadowTexelLoc = -1;
+		u_shadowNormalOffsetLoc = -1;
+		u_shadowStrengthLoc = -1;
+		u_shadowClipLoc = -1;
+		u_shadowFadeDistLoc = -1;
 		break;
 	}
 
@@ -1862,6 +1931,14 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 				glUniformMatrix4fv(u_shadowMatrixLoc, 1, GL_FALSE, g_shadowLightMatrix);
 			if (u_shadowBiasLoc != -1)
 				glUniform1f(u_shadowBiasLoc, g_PsyX_FlashlightShadowBias);
+			if (u_shadowNormalOffsetLoc != -1)
+				glUniform1f(u_shadowNormalOffsetLoc, g_PsyX_FlashlightShadowNormalOffset);
+			if (u_shadowStrengthLoc != -1)
+				glUniform1f(u_shadowStrengthLoc, g_PsyX_FlashlightShadowStrength);
+			if (u_shadowClipLoc != -1)
+				glUniform2f(u_shadowClipLoc, g_shadowZNear, g_shadowZFar);
+			if (u_shadowFadeDistLoc != -1)
+				glUniform1f(u_shadowFadeDistLoc, g_PsyX_FlashlightShadowFadeDist);
 			if (u_shadowTexelLoc != -1)
 				glUniform2f(u_shadowTexelLoc, 1.0f / (float)PSYX_SHADOW_MAP_SIZE, 1.0f / (float)PSYX_SHADOW_MAP_SIZE);
 			glActiveTexture(GL_TEXTURE1);
@@ -2738,6 +2815,8 @@ static void GR_BuildShadowMatrix(void)
 	float zn = 20.0f;
 	float zf = g_PsyX_FlashlightRange * 1.3f;
 	if (zf < zn + 1.0f) zf = zn + 1.0f;
+	g_shadowZNear = zn;
+	g_shadowZFar  = zf;
 
 	float eye[3] = { g_PsyX_FlashlightPos[0], g_PsyX_FlashlightPos[1], g_PsyX_FlashlightPos[2] };
 	float dir[3] = { g_PsyX_FlashlightDir[0], g_PsyX_FlashlightDir[1], g_PsyX_FlashlightDir[2] };
