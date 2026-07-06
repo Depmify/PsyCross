@@ -114,37 +114,44 @@ extern "C" void Shadow_Store(void* addr, float x, float y, float w, unsigned val
  * on/off, and it isn't noticeable at third-person camera distances.) */
 extern "C" int g_PsyX_NoShadowCast = 0;
 
-struct VsEntry { uintptr_t key; unsigned gen; float vx, vy, vz; float nocast; };
+/* Like the PGXP ShadowEntry, each entry records the packed integer `value` of the
+ * vertex word it shadows. A lookup whose current word differs falls to "untracked":
+ * without this, a prim whose XY was written by the CPU (muzzle-flash quads etc.)
+ * into a packet-buffer slot that a GTE-projected vertex used earlier in the same
+ * frame inherited THAT vertex's view-space position — the shadow depth pass then
+ * drew the quad at the stale position (the glitchy arm/gun shadow while firing). */
+struct VsEntry { uintptr_t key; unsigned gen; unsigned value; float vx, vy, vz; float nocast; };
 static VsEntry s_vshadow[SHADOW_SIZE];
 
-static void Vs_Put(void* addr, float vx, float vy, float vz, float nocast) {
+static void Vs_Put(void* addr, float vx, float vy, float vz, float nocast, unsigned value) {
 	uintptr_t k = (uintptr_t)addr;
 	unsigned s = ShadowHash(k);
 	for (int i = 0; i < 16; i++) {
 		VsEntry* e = &s_vshadow[(s + i) & SHADOW_MASK];
 		if (e->key == k || e->key == 0 || e->gen != s_pgxpGen) {
-			e->key = k; e->gen = s_pgxpGen; e->vx = vx; e->vy = vy; e->vz = vz; e->nocast = nocast; return;
+			e->key = k; e->gen = s_pgxpGen; e->value = value; e->vx = vx; e->vy = vy; e->vz = vz; e->nocast = nocast; return;
 		}
 	}
 	VsEntry* e = &s_vshadow[s];
-	e->key = k; e->gen = s_pgxpGen; e->vx = vx; e->vy = vy; e->vz = vz; e->nocast = nocast;
+	e->key = k; e->gen = s_pgxpGen; e->value = value; e->vx = vx; e->vy = vy; e->vz = vz; e->nocast = nocast;
 }
 
-static const VsEntry* Vs_Get(const void* addr) {
+static const VsEntry* Vs_Get(const void* addr, unsigned value) {
 	uintptr_t k = (uintptr_t)addr;
 	unsigned s = ShadowHash(k);
 	for (int i = 0; i < 16; i++) {
 		const VsEntry* e = &s_vshadow[(s + i) & SHADOW_MASK];
-		if (e->key == k) return (e->gen == s_pgxpGen) ? e : nullptr;
+		if (e->key == k) return (e->gen == s_pgxpGen && e->value == value) ? e : nullptr;
 		if (e->key == 0) return nullptr;
 	}
 	return nullptr;
 }
 
 /* GTE store hook for the flashlight view-space FIFO (PsyX_GTE.cpp PGXP_StoreAddr,
- * fired when g_PsyX_UsePerPixelFlashlight). */
+ * fired when g_PsyX_UsePerPixelFlashlight). The packed vertex word is already at
+ * addr when the hook fires (same contract as PGXP's Shadow_Store). */
 extern "C" void VShadow_Store(void* addr, float vx, float vy, float vz) {
-	Vs_Put(addr, vx, vy, vz, g_PsyX_NoShadowCast ? 1.0f : 0.0f);
+	Vs_Put(addr, vx, vy, vz, g_PsyX_NoShadowCast ? 1.0f : 0.0f, *(const unsigned*)addr);
 }
 
 /* Drawer copy hook (DuckStation CPU MOVE/SW): the game just did *dst = *src (a
@@ -159,8 +166,8 @@ extern "C" void Shadow_Copy(void* dst, const void* src) {
 		if (e) Shadow_Put(dst, e->x, e->y, e->w, *(const unsigned*)dst);
 	}
 	if (g_PsyX_UsePerPixelFlashlight) {
-		const VsEntry* ve = Vs_Get(src);
-		if (ve) Vs_Put(dst, ve->vx, ve->vy, ve->vz, ve->nocast);
+		const VsEntry* ve = Vs_Get(src, *(const unsigned*)src);
+		if (ve) Vs_Put(dst, ve->vx, ve->vy, ve->vz, ve->nocast, *(const unsigned*)dst);
 	}
 }
 
@@ -389,7 +396,7 @@ static inline void PgxpFillVertex(GrVertex* v, const void* addr, int rawX, int r
  * not lit). Called only when g_PsyX_UsePerPixelFlashlight. */
 static inline void VsFillVertex(GrVertex* v, const void* addr)
 {
-	const VsEntry* e = Vs_Get(addr);
+	const VsEntry* e = Vs_Get(addr, *(const unsigned*)addr);
 	/* nx doubles as the shadow-caster suppress flag (a_normal is otherwise unused —
 	 * the cone shader reconstructs its normal from derivatives). A miss leaves the
 	 * memset-0 default = casts normally. */
