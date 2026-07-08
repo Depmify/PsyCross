@@ -740,6 +740,7 @@ typedef struct
 	GLint ditherForceLoc;
 	GLint pixelScaleLoc;
 	GLint texelSizeLoc;
+	GLint texOffsetLoc;
 	GLint fogColorLoc;
 	GLint fogToBlackLoc;
 	GLint fogStrengthLoc;
@@ -776,6 +777,7 @@ GLint u_bilinearFilterLoc;
 GLint u_ditherForceLoc;
 GLint u_pixelScaleLoc;
 GLint u_texelSizeLoc;
+GLint u_texOffsetLoc;
 GLint u_fogColorLoc;
 GLint u_fogToBlackLoc;
 GLint u_fogStrengthLoc;
@@ -1212,9 +1214,20 @@ const char* gte_shader_32_rgba =
 	"	uniform float u_ditherForce;\n"\
 	"	uniform float u_pixelScale;\n"\
 	"	uniform vec2 texelSize;\n"\
+	"	uniform vec2 u_texOffset;\n"\
 	"	void main() {\n"\
-	"		vec2 tc = v_texcoord.xy * texelSize + texelSize * 0.5;\n"\
+	/* u_texOffset: the prim's tpage origin relative to the replaced TIM's
+	 * VRAM origin, in native texels. A surface wider than one tpage is drawn
+	 * as several prims whose UVs each restart at their own tpage — without
+	 * the offset every chunk sampled the override from x=0 (duplicated image). */
+	"		vec2 tc = (v_texcoord.xy + u_texOffset) * texelSize + texelSize * 0.5;\n"\
 	"		fragColor = texture2D(s_texture, tc);\n"\
+	/* PSX colour-0 transparency for hi-res overrides: alpha 0 texels are
+	 * holes on ANY prim (opaque prims ignore blending, so without the
+	 * discard they'd render solid). 0.5 cutoff keeps authored soft-alpha
+	 * edges blending on semi-transparent prims while opaque cutouts
+	 * (foliage/UI) stay clean. */
+	"		if (fragColor.a < 0.5) discard;\n"\
 	GPU_DITHERING\
 	"	}\n"
 	"#endif\n";
@@ -1435,6 +1448,7 @@ void GR_CompilePSXShader(GTEShader* sh, const char* source)
 	sh->pixelScaleLoc = glGetUniformLocation(sh->shader, "u_pixelScale");
 	sh->projectionLoc = glGetUniformLocation(sh->shader, "Projection");
 	sh->texelSizeLoc = glGetUniformLocation(sh->shader, "texelSize");
+	sh->texOffsetLoc = glGetUniformLocation(sh->shader, "u_texOffset");
 	sh->fogColorLoc = glGetUniformLocation(sh->shader, "u_fogColor");
 	sh->fogToBlackLoc = glGetUniformLocation(sh->shader, "u_fogToBlack");
 	sh->fogStrengthLoc = glGetUniformLocation(sh->shader, "u_fogStrength");
@@ -1766,6 +1780,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_projectionLoc = g_gte_shader_4.projectionLoc;
 		u_projection3DLoc = g_gte_shader_4.projection3DLoc;
 		u_texelSizeLoc = -1;
+		u_texOffsetLoc = -1;
 		u_fogColorLoc = g_gte_shader_4.fogColorLoc;
 		u_fogToBlackLoc = g_gte_shader_4.fogToBlackLoc;
 		u_fogStrengthLoc = g_gte_shader_4.fogStrengthLoc;
@@ -1795,6 +1810,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_projectionLoc = g_gte_shader_8.projectionLoc;
 		u_projection3DLoc = g_gte_shader_8.projection3DLoc;
 		u_texelSizeLoc = -1;
+		u_texOffsetLoc = -1;
 		u_fogColorLoc = g_gte_shader_8.fogColorLoc;
 		u_fogToBlackLoc = g_gte_shader_8.fogToBlackLoc;
 		u_fogStrengthLoc = g_gte_shader_8.fogStrengthLoc;
@@ -1824,6 +1840,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_projectionLoc = g_gte_shader_16.projectionLoc;
 		u_projection3DLoc = g_gte_shader_16.projection3DLoc;
 		u_texelSizeLoc = -1;
+		u_texOffsetLoc = -1;
 		u_fogColorLoc = g_gte_shader_16.fogColorLoc;
 		u_fogToBlackLoc = g_gte_shader_16.fogToBlackLoc;
 		u_fogStrengthLoc = g_gte_shader_16.fogStrengthLoc;
@@ -1853,6 +1870,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_projectionLoc = g_gte_shader_32_rgba.projectionLoc;
 		u_projection3DLoc = g_gte_shader_32_rgba.projection3DLoc;
 		u_texelSizeLoc = g_gte_shader_32_rgba.texelSizeLoc;
+		u_texOffsetLoc = g_gte_shader_32_rgba.texOffsetLoc;
 		u_fogColorLoc = g_gte_shader_32_rgba.fogColorLoc;
 		u_fogToBlackLoc = g_gte_shader_32_rgba.fogToBlackLoc;
 		u_fogStrengthLoc = g_gte_shader_32_rgba.fogStrengthLoc;
@@ -2005,7 +2023,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 	g_lastBoundTexture = texture;
 }
 
-void GR_SetOverrideTextureSize(int width, int height)
+void GR_SetOverrideTextureSize(int width, int height, int offsetX, int offsetY)
 {
 	if(u_texelSizeLoc == -1)
 		return;
@@ -2013,6 +2031,12 @@ void GR_SetOverrideTextureSize(int width, int height)
 	// WebGL is fucking around with glUniform2f, so use vector version
 	float vec[] = { 1.0f / (float)width, 1.0f / (float)height };
 	glUniform2fv(u_texelSizeLoc, 1, vec);
+
+	if(u_texOffsetLoc != -1)
+	{
+		float ofs[] = { (float)offsetX, (float)offsetY };
+		glUniform2fv(u_texOffsetLoc, 1, ofs);
+	}
 }
 
 void GR_DestroyTexture(TextureID texture)

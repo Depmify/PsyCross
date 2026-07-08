@@ -450,6 +450,57 @@ static const char* currentSplitDebugText = nullptr;
 TextureID overrideTexture = 0;
 int overrideTextureWidth = 0;
 int overrideTextureHeight = 0;
+int overrideTextureOffsetX = 0;
+int overrideTextureOffsetY = 0;
+
+// DR_PSYX_TEX packet state, kept separately so the hi-res override lookup
+// below can restore it on a miss instead of clobbering it to zero.
+static TextureID drPsyxTexOverride = 0;
+static int drPsyxTexOverrideWidth = 0;
+static int drPsyxTexOverrideHeight = 0;
+
+/* Hi-res texture overrides (host side, e.g. pc_port/src/hires_override.c).
+ * Returns a GL texture + the ORIGINAL TIM's native pixel size + the
+ * tpage-origin offset inside that TIM when the host registered a
+ * replacement for this tpage/clut, else 0. Weak stub so PsyCross still
+ * links for hosts that don't provide the table. */
+extern "C" unsigned int __attribute__((weak))
+HiresOverride_LookupByTpageClut(int tpage, int clut, int* outW, int* outH,
+                                int* outOffX, int* outOffY)
+{
+	(void)tpage; (void)clut; (void)outW; (void)outH; (void)outOffX; (void)outOffY;
+	return 0;
+}
+
+/* Route a textured prim through the (otherwise dormant) overrideTexture
+ * path when the host has a hi-res replacement for its tpage/clut. AddSplit
+ * keys splits on textureId, so batches open/close exactly at matching
+ * prims; overrideTextureWidth/Height feed texelSize with the NATIVE size,
+ * so the prim's tpage-relative UVs map 0..1 across any upscale factor.
+ * The offset shifts those UVs when the prim's tpage sits partway into the
+ * replaced TIM (surfaces wider than one tpage draw as several prims whose
+ * UVs restart at each tpage — without it every chunk showed the image
+ * from x=0). On a miss the DR_PSYX_TEX packet state is restored, so that
+ * path keeps its original semantics. */
+static inline void ApplyHiresOverride(int tpage, int clut)
+{
+	int nW = 0, nH = 0, offX = 0, offY = 0;
+	unsigned int hi = HiresOverride_LookupByTpageClut(tpage, clut, &nW, &nH, &offX, &offY);
+	if (hi != 0) {
+		overrideTexture        = (TextureID)hi;
+		overrideTextureWidth   = nW;
+		overrideTextureHeight  = nH;
+		overrideTextureOffsetX = offX;
+		overrideTextureOffsetY = offY;
+	}
+	else {
+		overrideTexture        = drPsyxTexOverride;
+		overrideTextureWidth   = drPsyxTexOverrideWidth;
+		overrideTextureHeight  = drPsyxTexOverrideHeight;
+		overrideTextureOffsetX = 0;
+		overrideTextureOffsetY = 0;
+	}
+}
 
 int g_GPUDisabledState = 0;
 int g_DrawPrimMode = 0;
@@ -660,6 +711,14 @@ void ClearSplits()
 	g_vertexIndex = 0;
 	g_splitIndex = 0;
 	g_splits[0].texFormat = (TexFormat)0xFFFF;
+	/* Don't let a hi-res override leak across frames. Restoring the
+	 * DR_PSYX_TEX packet state (instead of zeroing) keeps that path's
+	 * persist-until-changed semantics; it's a no-op when unused. */
+	overrideTexture = drPsyxTexOverride;
+	overrideTextureWidth = drPsyxTexOverrideWidth;
+	overrideTextureHeight = drPsyxTexOverrideHeight;
+	overrideTextureOffsetX = 0;
+	overrideTextureOffsetY = 0;
 }
 
 template<class T>
@@ -1414,6 +1473,11 @@ static void AddSplit(bool semiTrans, bool textured)
 	if (curSplit.blendMode == blendMode &&
 		curSplit.texFormat == texFormat &&
 		curSplit.textureId == textureId &&
+		/* tw.x/y carry the hi-res override UV offset: two chunks of the same
+		 * override texture with different tpage origins must NOT batch
+		 * together (same textureId!) or they'd share one offset uniform. */
+		curSplit.drawenv.tw.x == overrideTextureOffsetX &&
+		curSplit.drawenv.tw.y == overrideTextureOffsetY &&
 		curSplit.drawPrimMode == g_DrawPrimMode &&
 		curSplit.drawenv.clip.x == activeDrawEnv.clip.x &&
 		curSplit.drawenv.clip.y == activeDrawEnv.clip.y &&
@@ -1444,6 +1508,8 @@ static void AddSplit(bool semiTrans, bool textured)
 
 	split.drawenv.tw.w = overrideTextureWidth;
 	split.drawenv.tw.h = overrideTextureHeight;
+	split.drawenv.tw.x = overrideTextureOffsetX;
+	split.drawenv.tw.y = overrideTextureOffsetY;
 
 	split.startVertex = g_vertexIndex;
 	split.numVerts = 0;
@@ -1485,7 +1551,8 @@ void DrawSplit(const GPUDrawSplit& split)
 	GR_SetTexture(split.textureId, split.texFormat);
 
 	if (split.texFormat == TF_32_BIT_RGBA)
-		GR_SetOverrideTextureSize(split.drawenv.tw.w, split.drawenv.tw.h);
+		GR_SetOverrideTextureSize(split.drawenv.tw.w, split.drawenv.tw.h,
+		                          split.drawenv.tw.x, split.drawenv.tw.y);
 
 	const bool drawOnScreen = split.drawenv.dfe;
 	GR_SetupClipMode(&split.drawenv.clip, drawOnScreen);
@@ -1955,6 +2022,8 @@ static int ProcessFlatPoly(P_TAG* polyTag)
 		// It is an official hack from SCE devs to not use DR_TPAGE and instead use null polygon
 		if (!IsNull(poly))
 		{
+			ApplyHiresOverride(poly->tpage, poly->clut);
+
 			AddSplit(semiTrans, true);
 
 			GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
@@ -2039,6 +2108,7 @@ static int ProcessFlatPoly(P_TAG* polyTag)
 			}
 		}
 		activeDrawEnv.tpage = poly->tpage;
+		ApplyHiresOverride(poly->tpage, poly->clut);
 
 		AddSplit(semiTrans, true);
 
@@ -2102,6 +2172,7 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 	{
 		POLY_GT3* poly = (POLY_GT3*)polyTag;
 		activeDrawEnv.tpage = poly->tpage;
+		ApplyHiresOverride(poly->tpage, poly->clut);
 
 		AddSplit(semiTrans, true);
 
@@ -2154,6 +2225,7 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 	{
 		POLY_GT4* poly = (POLY_GT4*)polyTag;
 		activeDrawEnv.tpage = poly->tpage;
+		ApplyHiresOverride(poly->tpage, poly->clut);
 
 		AddSplit(semiTrans, true);
 
@@ -2215,6 +2287,7 @@ static int ProcessTileAndSprt(P_TAG* polyTag)
 	case 0x64:
 	{
 		SPRT* poly = (SPRT*)polyTag;
+		ApplyHiresOverride(activeDrawEnv.tpage, poly->clut);
 
 		AddSplit(semiTrans, true);
 
@@ -2275,6 +2348,7 @@ static int ProcessTileAndSprt(P_TAG* polyTag)
 	case 0x74:
 	{
 		SPRT_8* poly = (SPRT_8*)polyTag;
+		ApplyHiresOverride(activeDrawEnv.tpage, poly->clut);
 
 		AddSplit(semiTrans, true);
 
@@ -2315,6 +2389,7 @@ static int ProcessTileAndSprt(P_TAG* polyTag)
 	case 0x7C:
 	{
 		SPRT_16* poly = (SPRT_16*)polyTag;
+		ApplyHiresOverride(activeDrawEnv.tpage, poly->clut);
 
 		AddSplit(semiTrans, true);
 
@@ -2428,6 +2503,9 @@ static int ProcessPsyXPrims(P_TAG* polyTag)
 		overrideTexture = psytex->code[0] & 0xFFFFFF;
 		overrideTextureWidth = psytex->code[1] & 0xFFF;
 		overrideTextureHeight = psytex->code[1] >> 16 & 0xFFF;
+		drPsyxTexOverride = overrideTexture;
+		drPsyxTexOverrideWidth = overrideTextureWidth;
+		drPsyxTexOverrideHeight = overrideTextureHeight;
 		return 2;
 	}
 	case 0x02:
