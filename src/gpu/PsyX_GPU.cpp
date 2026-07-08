@@ -2094,7 +2094,12 @@ static int ProcessFlatPoly(P_TAG* polyTag)
 			 * code that never dropped or logged a single prim. */
 			int clutY = ((unsigned short)clut) >> 6;
 			(void)tx; (void)ty;
-			if (clutY > 511) {
+			/* clutY past VRAM is normally garbage — but the host's virtual
+			 * pool slots deliberately key GL-backed textures on clut values
+			 * with bit 15 set (clutY 512+). If the override table claims this
+			 * (tpage, clut), the prim never samples VRAM; let it through. */
+			if (clutY > 511 &&
+			    HiresOverride_LookupByTpageClut(tpage, clut, nullptr, nullptr, nullptr, nullptr) == 0) {
 				static int s_pft4DropCount = 0;
 				if (s_pft4DropCount < 32) {
 					eprintinfo("[PFT4DROP] tpage=0x%04hX clut=0x%04hX uvs=(%d,%d)(%d,%d)(%d,%d)(%d,%d) reason=clutY_oob (%d)\n",
