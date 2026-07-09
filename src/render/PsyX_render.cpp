@@ -1054,18 +1054,47 @@ int g_PsxFogToBlack = 0;
 	"		v_viewpos = a_viewpos;\n"\
 	"	}\n"
 
-/* Fog + per-pixel flashlight + shadow uniforms shared by every shader that
- * renders lit world geometry - including the 32-bit RGBA override shader,
- * whose textures (virtual pool slots, hi-res/pack replacements) cover the
- * same world surfaces as the VRAM samplers. */
-#define GPU_LIT_UNIFORMS\
-
-
-/* The lit fragment tail: vertex-color modulate, per-pixel flashlight +
- * shadow, then fog - dither/quantize follows as the very last op. Shared so
- * override-drawn geometry matches the VRAM samplers exactly (missing fog on
- * override surfaces was visible as unfogged distant walls). */
-#define GPU_LIT_TAIL\
+#define GPU_FRAGMENT_SAMPLE_SHADER(bit) \
+	GPU_PACK_RG_FUNC\
+	GPU_DECODE_RG_FUNC\
+	GPU_FETCH_VRAM_FUNC\
+	"	const vec2 c_VRAMTexel = vec2(1.0 / 1024.0, 1.0 / 512.0);\n"\
+	GPU_ARRAY_FUNC\
+	GPU_SAMPLE_TEXTURE_## bit ##BIT_FUNC\
+	GPU_BILINEAR_SAMPLE_FUNC\
+	GPU_NEAREST_SAMPLE_FUNC\
+	"	uniform int bilinearFilter;\n"\
+	"	uniform float u_ditherForce;\n"\
+	"	uniform float u_pixelScale;\n"\
+	"	uniform vec3 u_fogColor;\n"\
+	"	uniform int u_fogToBlack;\n"\
+	"	uniform float u_fogStrength;\n"\
+	"	uniform int u_flashlightOn;\n"\
+	"	uniform vec3 u_flLightPos;\n"\
+	"	uniform vec3 u_flDir;\n"\
+	"	uniform vec3 u_flColor;\n"\
+	"	uniform float u_flInnerCos;\n"\
+	"	uniform float u_flOuterCos;\n"\
+	"	uniform float u_flRange;\n"\
+	"	uniform int u_shadowOn;\n"\
+	"	uniform sampler2D u_shadowTex;\n"\
+	"	uniform mat4 u_shadowMatrix;\n"\
+	"	uniform float u_shadowBias;\n"\
+	"	uniform vec2 u_shadowTexel;\n"\
+	"	uniform float u_shadowNormalOffset;\n"\
+	"	uniform float u_shadowStrength;\n"\
+	"	uniform vec2 u_shadowClip;\n"\
+	"	uniform float u_shadowFadeDist;\n"\
+	/* Window depth [0,1] -> linear distance along the light's forward axis, using the shadow frustum's near/far (u_shadowClip). Lets us measure how far a receiver sits BEHIND its occluder in world units. */\
+	"	float shLinDepth(float zw) {\n"\
+	"		float ndc = zw * 2.0 - 1.0;\n"\
+	"		return (2.0 * u_shadowClip.x * u_shadowClip.y) / (u_shadowClip.y + u_shadowClip.x - ndc * (u_shadowClip.y - u_shadowClip.x));\n"\
+	"	}\n"\
+	"	void main() {\n"\
+	"		if(bilinearFilter > 0 && v_is3d > 0.5)\n"\
+	"			fragColor = BilinearTextureSample(v_texcoord.xy);\n"\
+	"		else\n"\
+	"			fragColor = NearestTextureSample(v_texcoord.xy);\n"\
 	"		vec3 flAlbedo = fragColor.rgb;\n"\
 	"		fragColor *= v_color;\n"\
 	/* Per-pixel flashlight: spotlight cone * per-fragment Lambert (N.L). GrVertex carries no usable normals, so the surface normal is reconstructed from the view-space position gradient (cross(dFdx,dFdy)) -- v_viewpos is the same proven view-space pos the cone already uses, so this needs no GTE-side normal capture and is exact per triangle face. Derivatives are taken inside the UNIFORM u_flashlightOn branch (never the per-fragment z test) so they stay well-defined. The flashlight term modulates the texture albedo (flAlbedo) and adds to the dimmed base, so lit surfaces keep their texture and N.L shading instead of washing to flat white. */\
@@ -1123,89 +1152,7 @@ int g_PsxFogToBlack = 0;
 	"		if (u_fogToBlack > 0)\n"\
 	"			fragColor.rgb *= (1.0 - fogAmt);\n"\
 	"		else\n"\
-	"			fragColor.rgb = mix(fragColor.rgb, u_fogColor, fogAmt);\n"
-
-#define GPU_FRAGMENT_SAMPLE_SHADER(bit) \
-	GPU_PACK_RG_FUNC\
-	GPU_DECODE_RG_FUNC\
-	GPU_FETCH_VRAM_FUNC\
-	"	const vec2 c_VRAMTexel = vec2(1.0 / 1024.0, 1.0 / 512.0);\n"\
-	GPU_ARRAY_FUNC\
-	GPU_SAMPLE_TEXTURE_## bit ##BIT_FUNC\
-	GPU_BILINEAR_SAMPLE_FUNC\
-	GPU_NEAREST_SAMPLE_FUNC\
-	"	uniform int bilinearFilter;\n"\
-	"	uniform float u_ditherForce;\n"\
-	"	uniform float u_pixelScale;\n"\
-	GPU_LIT_UNIFORMS\
-	"	void main() {\n"\
-	"		v_texcoord = a_texcoord;\n"\
-	"		v_texcoord.xy += a_extra.xy * 0.5;\n"\
-	"		v_color = a_color;\n"\
-	"		v_color.xyz *= a_texcoord.z;\n"\
-	"		v_page_clut.x = fract(a_position.z / 16.0) * 1024.0;\n"\
-	"		v_page_clut.y = floor(a_position.z / 16.0) * 256.0;\n"\
-	"		v_page_clut.z = fract(a_position.w / 64.0);\n"\
-	"		v_page_clut.w = floor(a_position.w / 64.0) / 512.0;\n"\
-	"		v_page_clut.xy += c_UVFudge;\n"\
-	"		v_page_clut.zw += c_UVFudge;\n"\
-	GTE_PERSPECTIVE_CORRECTION\
-	/* v_is3d gates dither + bilinear so 2D logos/UI render sharp.
-	 * The `a_zw.y > 100` test only distinguishes 3D from 2D when the
-	 * runtime PGXP master gate is on (then a_zw.y is the screen
-	 * height ~240 for 3D content, 0 for 2D). With PGXP off at
-	 * runtime, ApplyVertexPGXP zeroes a_zw for everything → without
-	 * the u_pgxpEnabled override every prim would read v_is3d=0 and
-	 * we'd lose dither / bilinear on real 3D geometry too (visibly
-	 * blocky tree leaves, etc.). When pgxp off, fall back to legacy
-	 * "always treat as 3D" behavior — matches legacy behavior. */	"		v_is3d = (u_pgxpEnabled > 0) ? ((a_pgxp.z > 0.0) ? 1.0 : 0.0) : 1.0;\n"\
-	"		v_z = (gl_Position.z - 40.0) * 0.005;\n"\
-	"		v_fogAmount = clamp(a_extra.z / 127.0, 0.0, 1.0);\n"\
-	"		v_viewpos = a_viewpos;\n"\
-	"	}\n"
-
-#define GPU_FRAGMENT_SAMPLE_SHADER(bit) \
-	GPU_PACK_RG_FUNC\
-	GPU_DECODE_RG_FUNC\
-	GPU_FETCH_VRAM_FUNC\
-	"	const vec2 c_VRAMTexel = vec2(1.0 / 1024.0, 1.0 / 512.0);\n"\
-	GPU_ARRAY_FUNC\
-	GPU_SAMPLE_TEXTURE_## bit ##BIT_FUNC\
-	GPU_BILINEAR_SAMPLE_FUNC\
-	GPU_NEAREST_SAMPLE_FUNC\
-	"	uniform int bilinearFilter;\n"\
-	"	uniform float u_ditherForce;\n"\
-	"	uniform float u_pixelScale;\n"\
-	"	uniform vec3 u_fogColor;\n"\
-	"	uniform int u_fogToBlack;\n"\
-	"	uniform float u_fogStrength;\n"\
-	"	uniform int u_flashlightOn;\n"\
-	"	uniform vec3 u_flLightPos;\n"\
-	"	uniform vec3 u_flDir;\n"\
-	"	uniform vec3 u_flColor;\n"\
-	"	uniform float u_flInnerCos;\n"\
-	"	uniform float u_flOuterCos;\n"\
-	"	uniform float u_flRange;\n"\
-	"	uniform int u_shadowOn;\n"\
-	"	uniform sampler2D u_shadowTex;\n"\
-	"	uniform mat4 u_shadowMatrix;\n"\
-	"	uniform float u_shadowBias;\n"\
-	"	uniform vec2 u_shadowTexel;\n"\
-	"	uniform float u_shadowNormalOffset;\n"\
-	"	uniform float u_shadowStrength;\n"\
-	"	uniform vec2 u_shadowClip;\n"\
-	"	uniform float u_shadowFadeDist;\n"\
-	/* Window depth [0,1] -> linear distance along the light's forward axis, using the shadow frustum's near/far (u_shadowClip). Lets us measure how far a receiver sits BEHIND its occluder in world units. */\
-	"	float shLinDepth(float zw) {\n"\
-	"		float ndc = zw * 2.0 - 1.0;\n"\
-	"		return (2.0 * u_shadowClip.x * u_shadowClip.y) / (u_shadowClip.y + u_shadowClip.x - ndc * (u_shadowClip.y - u_shadowClip.x));\n"\
-	"	}\n"\
-	"	void main() {\n"\
-	"		if(bilinearFilter > 0 && v_is3d > 0.5)\n"\
-	"			fragColor = BilinearTextureSample(v_texcoord.xy);\n"\
-	"		else\n"\
-	"			fragColor = NearestTextureSample(v_texcoord.xy);\n"\
-	GPU_LIT_TAIL\
+	"			fragColor.rgb = mix(fragColor.rgb, u_fogColor, fogAmt);\n"\
 	GPU_DITHERING_NO_VCOLOR\
 	"	}\n"
 
@@ -1268,7 +1215,6 @@ const char* gte_shader_32_rgba =
 	"	uniform float u_pixelScale;\n"\
 	"	uniform vec2 texelSize;\n"\
 	"	uniform vec2 u_texOffset;\n"\
-	GPU_LIT_UNIFORMS\
 	"	void main() {\n"\
 	/* u_texOffset: the prim's tpage origin relative to the replaced TIM's
 	 * VRAM origin, in native texels. A surface wider than one tpage is drawn
@@ -1282,8 +1228,7 @@ const char* gte_shader_32_rgba =
 	 * edges blending on semi-transparent prims while opaque cutouts
 	 * (foliage/UI) stay clean. */
 	"		if (fragColor.a < 0.5) discard;\n"\
-	GPU_LIT_TAIL\
-	GPU_DITHERING_NO_VCOLOR\
+	GPU_DITHERING\
 	"	}\n"
 	"#endif\n";
 
@@ -1920,7 +1865,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 	case TF_32_BIT_RGBA:
 		GR_SetShader(g_gte_shader_32_rgba.shader);
 		u_bilinearFilterLoc = -1;
-		u_ditherForceLoc = g_gte_shader_32_rgba.ditherForceLoc;
+		u_ditherForceLoc = -1;
 		u_pixelScaleLoc = -1;
 		u_projectionLoc = g_gte_shader_32_rgba.projectionLoc;
 		u_projection3DLoc = g_gte_shader_32_rgba.projection3DLoc;
@@ -1938,14 +1883,14 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_flInnerCosLoc = g_gte_shader_32_rgba.flInnerCosLoc;
 		u_flOuterCosLoc = g_gte_shader_32_rgba.flOuterCosLoc;
 		u_flRangeLoc = g_gte_shader_32_rgba.flRangeLoc;
-		u_shadowOnLoc = g_gte_shader_32_rgba.shadowOnLoc;
-		u_shadowMatrixLoc = g_gte_shader_32_rgba.shadowMatrixLoc;
-		u_shadowBiasLoc = g_gte_shader_32_rgba.shadowBiasLoc;
-		u_shadowTexelLoc = g_gte_shader_32_rgba.shadowTexelLoc;
-		u_shadowNormalOffsetLoc = g_gte_shader_32_rgba.shadowNormalOffsetLoc;
-		u_shadowStrengthLoc = g_gte_shader_32_rgba.shadowStrengthLoc;
-		u_shadowClipLoc = g_gte_shader_32_rgba.shadowClipLoc;
-		u_shadowFadeDistLoc = g_gte_shader_32_rgba.shadowFadeDistLoc;
+		u_shadowOnLoc = -1;
+		u_shadowMatrixLoc = -1;
+		u_shadowBiasLoc = -1;
+		u_shadowTexelLoc = -1;
+		u_shadowNormalOffsetLoc = -1;
+		u_shadowStrengthLoc = -1;
+		u_shadowClipLoc = -1;
+		u_shadowFadeDistLoc = -1;
 		break;
 	}
 
