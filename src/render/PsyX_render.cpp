@@ -204,13 +204,11 @@ int g_PsyX_UsePerPixelFlashlight = 0;
 int   g_PsyX_UseFlashlightShadows = 0;
 /* Depth-compare bias in light-clip [0,1] space; tunable via `shadowbias` console. */
 float g_PsyX_FlashlightShadowBias = 0.0018f;
-/* Optional shadow-look console tweaks, all DEFAULTING TO NO-OP so the default
- * render is the plain hard 3x3 shadow (which looks right for monsters). They exist
- * for live tuning of the prop-shadow "silhouette" look; see the shader.
+/* Optional shadow-look console tweaks, all DEFAULTING TO NO-OP. They exist for
+ * live tuning of the prop-shadow "silhouette" look; see the shader.
  *
- * Normal-offset (`shadownormal`, 0 = off): push the receiver sample off its surface
- * toward the light by (this * dist-to-light), more at grazing angles — reduces
- * self-shadow acne on flat surfaces. */
+ * Receiver offset (`shadownormal`, 0 = off): move the sample toward the light
+ * along the light ray by (this * dist-to-light). */
 float g_PsyX_FlashlightShadowNormalOffset = 0.0f;
 /* How much light a fully-occluded pixel loses (`shadowstrength`): 1.0 = pitch black
  * (default/original), lower = softer half-shadow. */
@@ -244,19 +242,19 @@ float g_PsyX_FlashlightPos[3]   = { 0.0f, 0.0f, 0.0f };
  * shadows land exactly where the third-person camera shows them. */
 float g_PsyX_FlashlightShadowPos[3] = { 0.0f, 0.0f, 0.0f };
 float g_PsyX_FlashlightDir[3]   = { 0.0f, 0.0f, 1.0f };
-float g_PsyX_FlashlightColor[3] = { 1.0f, 0.95f, 0.85f };  /* warm white; per-fragment N.L + screen-blend keep facing/near surfaces a bright hotspot while angled/far surfaces fall off naturally */
+float g_PsyX_FlashlightColor[3] = { 1.0f, 1.0f, 1.0f };
 float g_PsyX_FlashlightInnerCos = 0.94f;  /* ~20 deg */
-float g_PsyX_FlashlightOuterCos = 0.82f;  /* ~35 deg */
+float g_PsyX_FlashlightOuterCos = 0.76f;  /* ~41 deg */
 float g_PsyX_FlashlightRange    = 4000.0f;
 /* PC port: flashlight cone coverage-area multiplier, applied to Inner/OuterCos at
  * push time (1.0 = base cone; 1.5 default = ~1.5x coverage). Live-editable via
  * [ / ] + backslash and persisted as config key flashlight_size. */
-float g_PsyX_FlashlightSize     = 2.4f;
+float g_PsyX_FlashlightSize     = 3.0f;
 
 /* PC port: live per-effect intensity -- [ lowers, ] raises, backslash switches
  * which effect (among the enabled ones); also the FLINT/POSTINT/TMINT console
  * commands. Persisted to config. */
-float g_PsyX_FlashlightIntensity = 2.10f; /* cone brightness scale, 0..3 */
+float g_PsyX_FlashlightIntensity = 1.20f; /* cone brightness scale, 0..3 */
 /* FPS-mode flashlight overrides: a head-mounted light wants a tighter, dimmer
  * cone than the third-person one. g_PsyX_FlashlightFpsMode is set by the game
  * each frame (= g_PcFpsCam); when 1 the shader uses these instead of the values
@@ -1091,45 +1089,60 @@ int g_PsxFogToBlack = 0;
 #define GPU_LIT_TAIL\
 	"		vec3 flAlbedo = fragColor.rgb;\n"\
 	"		fragColor *= v_color;\n"\
-	/* Per-pixel flashlight: spotlight cone * per-fragment Lambert (N.L). GrVertex carries no usable normals, so the surface normal is reconstructed from the view-space position gradient (cross(dFdx,dFdy)) -- v_viewpos is the same proven view-space pos the cone already uses, so this needs no GTE-side normal capture and is exact per triangle face. Derivatives are taken inside the UNIFORM u_flashlightOn branch (never the per-fragment z test) so they stay well-defined. The flashlight term modulates the texture albedo (flAlbedo) and adds to the dimmed base, so lit surfaces keep their texture and N.L shading instead of washing to flat white. */\
+	/* The original flashlight overlay is orientation-independent; the cone and shadow receiver therefore do not use per-triangle face normals. */\
 	"		if (u_flashlightOn > 0) {\n"\
 	"			vec3 flP = v_viewpos;\n"\
-	"			vec3 flN = cross(dFdx(flP), dFdy(flP));\n"\
 	"			if (flP.z > 0.0) {\n"\
-	"				fragColor.rgb *= 0.15; // per-vertex lighting -> dark base so the per-pixel cone is the only flashlight\n"\
-	"				vec3 L = u_flLightPos - flP;\n"\
+	"				fragColor.rgb *= 0.49;\n"\
+	"				vec3 flDir = normalize(u_flDir);\n"\
+	"				vec3 L = (u_flLightPos - flDir * 39.0) - flP;\n"\
 	"				float d = length(L);\n"\
 	"				L /= max(d, 0.0001);\n"\
-	"				float nlen = length(flN);\n"\
-	"				vec3 N = (nlen > 1e-9) ? flN / nlen : vec3(0.0, 0.0, -1.0);\n"\
-	"				if (dot(N, flP) > 0.0) N = -N;\n"\
-	"				float ndl = 0.15 + 0.85 * max(dot(N, L), 0.0);\n"\
-	"				float cone  = smoothstep(u_flOuterCos, u_flInnerCos, dot(-L, normalize(u_flDir)));\n"\
-	"				float atten = clamp(1.0 - d / u_flRange, 0.0, 1.0);\n"\
-	/* Real shadow map: project the view-space fragment into the light's clip space and compare its depth against the nearest occluder the light saw; 3x3 PCF softens the hard 1024^2 edge, and a slope-scaled bias (from N.L) fights acne. Gated on u_shadowOn so the no-shadow path is untouched. */\
+	"				float cone  = smoothstep(u_flOuterCos, u_flInnerCos, dot(-L, flDir));\n"\
+	"				cone = cone * (2.0 - cone);\n"\
+	/* Center-beam distance envelope derived from SH1's func_80057658 at full Q12 flashlight strength: its GTE projection reduces to a capped 1/d term plus a thresholded 1/d^2 term, normalized by the room-light cap. */\
+	"				float attenD = d * 2.0;\n"\
+	"				float invD = 1.0 / max(attenD, 1.0);\n"\
+	"				float atten = max(0.0, 134217728.0 * invD * invD - 16.0);\n"\
+	"				atten += min(48.0, 32768.0 * invD);\n"\
+	"				atten = clamp(atten / 255.0, 0.0, 1.0);\n"\
+	"				atten *= 1.0 - smoothstep(u_flRange * 0.9, u_flRange, attenD);\n"\
+	/* Bilinearly interpolated 3x3 PCF avoids kernel jumps as the projected receiver crosses shadow texels. */\
 	"				float shadow = 1.0;\n"\
 	"				if (u_shadowOn > 0) {\n"\
-	/* Normal-offset: sample the shadow map at a point pushed off the surface toward the light, more so at grazing angles. Removes the self-shadow acne that flat surfaces get when the near-horizontal beam grazes them (the depth bias alone can't span the huge texel footprint there). */\
-	"					vec3 Noff = (dot(N, L) < 0.0) ? -N : N;\n"\
-	"					float graze = 1.0 - max(dot(Noff, L), 0.0);\n"\
-	"					vec3 flPs = flP + Noff * (u_shadowNormalOffset * d * (0.5 + graze));\n"\
+	"					vec3 flPs = flP + L * (u_shadowNormalOffset * d);\n"\
 	"					vec4 lp = u_shadowMatrix * vec4(flPs, 1.0);\n"\
 	"					if (lp.w > 0.0) {\n"\
 	"						vec3 luv = lp.xyz / lp.w * 0.5 + 0.5;\n"\
 	"						if (luv.x > 0.0 && luv.x < 1.0 && luv.y > 0.0 && luv.y < 1.0 && luv.z < 1.0) {\n"\
-	"							float sbias = u_shadowBias * (1.0 + 3.0 * (1.0 - max(dot(N, L), 0.0)));\n"\
-	/* Optional console tweaks, all no-ops at their defaults so the shadow is the plain 3x3 PCF hard shadow by default. u_shadowFadeDist > 0 turns on contact fade (weight each occluded sample by how far the receiver sits behind its occluder, so a prop drops a fading contact shadow instead of a tall silhouette); u_shadowStrength < 1 softens how dark a shadow gets; u_shadowNormalOffset > 0 pushes the sample off the surface (see flPs above). */\
+	"							vec3 luvDx = dFdx(luv);\n"\
+	"							vec3 luvDy = dFdy(luv);\n"\
+	"							float det = luvDx.x * luvDy.y - luvDx.y * luvDy.x;\n"\
+	"							float dzdu = 0.0;\n"\
+	"							float dzdv = 0.0;\n"\
+	"							if (abs(det) > 1e-9) {\n"\
+	"								dzdu = (luvDx.z * luvDy.y - luvDy.z * luvDx.y) / det;\n"\
+	"								dzdv = (luvDy.z * luvDx.x - luvDx.z * luvDy.x) / det;\n"\
+	"							}\n"\
 	"							float recvLin = (u_shadowFadeDist > 0.0) ? shLinDepth(luv.z) : 0.0;\n"\
 	"							float occ = 0.0;\n"\
-	"							for (int sy = -1; sy <= 1; sy++) {\n"\
-	"								for (int sx = -1; sx <= 1; sx++) {\n"\
-	"									float sd = texture2D(u_shadowTex, luv.xy + vec2(float(sx), float(sy)) * u_shadowTexel).r;\n"\
-	"									if (luv.z - sbias > sd) {\n"\
+	"							vec2 texelPos = luv.xy / u_shadowTexel - vec2(0.5);\n"\
+	"							vec2 texelBase = floor(texelPos);\n"\
+	"							vec2 texelFrac = fract(texelPos);\n"\
+	"							for (int sy = -1; sy <= 2; sy++) {\n"\
+	"								float wy = (sy == -1) ? (1.0 - texelFrac.y) : ((sy == 2) ? texelFrac.y : 1.0);\n"\
+	"								for (int sx = -1; sx <= 2; sx++) {\n"\
+	"									float wx = (sx == -1) ? (1.0 - texelFrac.x) : ((sx == 2) ? texelFrac.x : 1.0);\n"\
+	"									float weight = wx * wy;\n"\
+	"									vec2 suv = (texelBase + vec2(float(sx), float(sy)) + vec2(0.5)) * u_shadowTexel;\n"\
+	"									float sd = texture2D(u_shadowTex, suv).r;\n"\
+	"									float receiverDepth = luv.z + dzdu * (suv.x - luv.x) + dzdv * (suv.y - luv.y);\n"\
+	"									if (receiverDepth - u_shadowBias > sd) {\n"\
 	"										if (u_shadowFadeDist > 0.0) {\n"\
 	"											float gap = recvLin - shLinDepth(sd);\n"\
-	"											occ += 1.0 - clamp(gap / u_shadowFadeDist, 0.0, 1.0);\n"\
+	"											occ += weight * (1.0 - clamp(gap / u_shadowFadeDist, 0.0, 1.0));\n"\
 	"										} else {\n"\
-	"											occ += 1.0;\n"\
+	"											occ += weight;\n"\
 	"										}\n"\
 	"									}\n"\
 	"								}\n"\
@@ -1138,7 +1151,7 @@ int g_PsxFogToBlack = 0;
 	"						}\n"\
 	"					}\n"\
 	"				}\n"\
-	"				vec3 fl = u_flColor * (cone * atten * ndl * shadow);\n"\
+	"				vec3 fl = u_flColor * (cone * atten * shadow);\n"\
 	"				fragColor.rgb += flAlbedo * fl;\n"\
 	"			}\n"\
 	"		}\n"\
@@ -2765,10 +2778,8 @@ static const char* s_shadowDepthShaderSrc =
 	"attribute vec3 a_normal;\n"
 	"uniform mat4 u_shadowMatrix;\n"
 	"void main() {\n"
-	/* Untracked (2D/UI) verts have vsz==0; push them outside clip so they never
-	 * write shadow depth (matches the cone shader's flP.z>0 gate). a_normal.x is
-	 * the per-vertex no-cast flag (Harry's body) -> also excluded. */
-	"	if (a_viewpos.z <= 0.0 || a_normal.x > 0.5) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }\n"
+	/* a_normal.y marks a validated view-space entry; a_normal.x suppresses casting. */
+	"	if (a_normal.y < 0.5 || a_viewpos.z <= 0.0 || a_normal.x > 0.5) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }\n"
 	"	gl_Position = u_shadowMatrix * vec4(a_viewpos, 1.0);\n"
 	"}\n"
 	"#else\n"
@@ -2942,7 +2953,7 @@ void GR_ShadowPassBegin(void)
 	glClear(GL_DEPTH_BUFFER_BIT);
 
 	glEnable(GL_POLYGON_OFFSET_FILL);
-	glPolygonOffset(2.0f, 4.0f);  /* constant + slope depth bias against acne */
+	glPolygonOffset(1.5f, 1.0f);
 
 	glUseProgram(g_shadowDepthShader);
 	if (g_shadowDepthMatrixLoc != -1)
