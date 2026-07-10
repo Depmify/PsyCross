@@ -254,7 +254,7 @@ float g_PsyX_FlashlightSize     = 3.0f;
 /* PC port: live per-effect intensity -- [ lowers, ] raises, backslash switches
  * which effect (among the enabled ones); also the FLINT/POSTINT/TMINT console
  * commands. Persisted to config. */
-float g_PsyX_FlashlightIntensity = 0.89f; /* cone brightness scale, 0..3 */
+float g_PsyX_FlashlightIntensity = 1.20f; /* cone brightness scale, 0..3 */
 /* FPS-mode flashlight overrides: a head-mounted light wants a tighter, dimmer
  * cone than the third-person one. g_PsyX_FlashlightFpsMode is set by the game
  * each frame (= g_PcFpsCam); when 1 the shader uses these instead of the values
@@ -1097,13 +1097,19 @@ int g_PsxFogToBlack = 0;
 	"		if (u_flashlightOn > 0) {\n"\
 	"			vec3 flP = v_viewpos;\n"\
 	"			if (flP.z > 0.0) {\n"\
-	"				fragColor.rgb *= 0.55;\n"\
+	"				fragColor.rgb *= 0.49;\n"\
 	"				vec3 L = u_flLightPos - flP;\n"\
 	"				float d = length(L);\n"\
 	"				L /= max(d, 0.0001);\n"\
 	"				float cone  = smoothstep(u_flOuterCos, u_flInnerCos, dot(-L, normalize(u_flDir)));\n"\
 	"				cone = cone * (2.0 - cone);\n"\
-	"				float atten = clamp(1.0 - d / u_flRange, 0.0, 1.0);\n"\
+	/* Center-beam distance envelope derived from SH1's func_80057658 at full Q12 flashlight strength: its GTE projection reduces to a capped 1/d term plus a thresholded 1/d^2 term, normalized by the room-light cap. */\
+	"				float attenD = d * 1.25;\n"\
+	"				float invD = 1.0 / max(attenD, 1.0);\n"\
+	"				float atten = max(0.0, 134217728.0 * invD * invD - 16.0);\n"\
+	"				atten += min(48.0, 32768.0 * invD);\n"\
+	"				atten = clamp(atten / 255.0, 0.0, 1.0);\n"\
+	"				atten *= 1.0 - smoothstep(u_flRange * 0.9, u_flRange, attenD);\n"\
 	/* Bilinearly interpolated 3x3 PCF avoids kernel jumps as the projected receiver crosses shadow texels. */\
 	"				float shadow = 1.0;\n"\
 	"				if (u_shadowOn > 0) {\n"\
