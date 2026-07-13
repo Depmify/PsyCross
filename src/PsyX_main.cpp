@@ -965,7 +965,10 @@ uint PsyX_CalcFPS();
  * AFTER the freeze-frame is captured, so the console is never baked into a frozen
  * pause / "no map" image (which would ghost the live console against the frozen copy).
  * NULL = nothing extra drawn. */
-extern "C" void (*g_PsyX_PostCaptureHook)(void) = NULL;
+extern "C"
+{
+	void (*g_PsyX_PostCaptureHook)(void) = NULL;
+}
 
 void PsyX_EndScene()
 {

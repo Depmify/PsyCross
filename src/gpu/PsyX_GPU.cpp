@@ -112,7 +112,10 @@ extern "C" void Shadow_Store(void* addr, float x, float y, float w, unsigned val
  * projects from the hand-height flashlight so it can look like a silhouette growing
  * off the object up close in first person — acceptable; shadows have their own
  * on/off, and it isn't noticeable at third-person camera distances.) */
-extern "C" int g_PsyX_NoShadowCast = 0;
+extern "C"
+{
+	int g_PsyX_NoShadowCast = 0;
+}
 
 /* Like the PGXP ShadowEntry, each entry records the packed integer `value` of the
  * vertex word it shadows. A lookup whose current word differs falls to "untracked":
