@@ -22,6 +22,9 @@ typedef struct
 	u_short				hystWord[2]; /* PC: per-mapping Schmitt-trigger latch (analog->digital anti-chatter) */
 } PsyXController;
 
+static const Sint32 kControllerSlotAuto = -1;
+static const Sint32 kControllerSlotDisabled = -2;
+
 int						g_cfg_controllerToSlotMapping[MAX_CONTROLLERS] = { -1, -1 };
 
 /* PC port: movement source for the controller. 0 = analog stick only,
@@ -42,7 +45,7 @@ static int				g_actBufLen[MAX_CONTROLLERS];
 const u_char*			g_sdlKeyboardState = NULL;
 
 u_short PsyX_Pad_UpdateKeyboardInput();
-void	PsyX_Pad_UpdateGameControllerInput(PsyXController* controller, LPPADRAW pad);
+void	PsyX_Pad_UpdateGameControllerInput(int slot, PsyXController* controller, LPPADRAW pad);
 
 // Initializes SDL controllers
 int PsyX_Pad_InitSystem()
@@ -52,6 +55,11 @@ int PsyX_Pad_InitSystem()
 		return 1;
 
 	memset(g_controllers, 0, sizeof(g_controllers));
+
+	/* Keep controller events alive when this process is not the focused
+	 * window; required by launcher splitscreen where P1 and P2 are separate
+	 * processes. */
+	SDL_SetHintWithPriority(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1", SDL_HINT_OVERRIDE);
 
 	// init keyboard state
 	g_sdlKeyboardState = SDL_GetKeyboardState(NULL);
@@ -118,7 +126,7 @@ void PsyX_Pad_OpenController(Sint32 deviceId, int slot)
 	if (controller->gc)
 	{
 		// assign device id automatically
-		if (controller->deviceId == -1)
+		if (controller->deviceId == kControllerSlotAuto)
 			controller->deviceId = deviceId;
 	}
 }
@@ -157,6 +165,39 @@ void PsyX_Pad_InitPad(int slot, u_char* padData)
 		pad->analog[2] = 128;
 		pad->analog[3] = 128;
 	}
+
+	if (!controller->gc)
+	{
+		if (controller->deviceId >= 0)
+		{
+			PsyX_Pad_OpenController(controller->deviceId, slot);
+		}
+		else if (controller->deviceId == kControllerSlotDisabled)
+		{
+		}
+		else if (controller->deviceId == kControllerSlotAuto)
+		{
+			for (int i = 0; i < SDL_NumJoysticks(); i++)
+			{
+				bool alreadyUsed = false;
+				if (!SDL_IsGameController(i))
+					continue;
+				for (int j = 0; j < MAX_CONTROLLERS; j++)
+				{
+					if (j != slot && g_controllers[j].gc && g_controllers[j].deviceId == i)
+					{
+						alreadyUsed = true;
+						break;
+					}
+				}
+				if (!alreadyUsed)
+				{
+					PsyX_Pad_OpenController(i, slot);
+					break;
+				}
+			}
+		}
+	}
 }
 
 // called from Psy-X SDL events
@@ -176,7 +217,7 @@ void PsyX_Pad_Event_ControllerAdded(Sint32 deviceId)
 	{
 		controller = &g_controllers[i];
 
-		if (controller->deviceId == -1 || controller->deviceId == deviceId)
+		if (controller->deviceId == kControllerSlotAuto || controller->deviceId == deviceId)
 		{
 			PsyX_Pad_OpenController(deviceId, i);
 			break;
@@ -223,7 +264,7 @@ void PsyX_Pad_InternalPadUpdates()
 		{
 			pad = (LPPADRAW)controller->padData;
 
-			PsyX_Pad_UpdateGameControllerInput(controller, pad);
+			PsyX_Pad_UpdateGameControllerInput(i, controller, pad);
 
 			// Retransmit the registered actuator buffer (PSX pad driver
 			// behavior) so in-place value changes by the game reach SDL.
@@ -354,11 +395,12 @@ static u_short PsyX_Pad_BuildPadWord(SDL_GameController* cont, const PsyXControl
 	return ret;
 }
 
-void PsyX_Pad_UpdateGameControllerInput(PsyXController* controller, LPPADRAW pad)
+void PsyX_Pad_UpdateGameControllerInput(int slot, PsyXController* controller, LPPADRAW pad)
 {
 	SDL_GameController* cont = controller->gc;
 	short leftX, leftY, rightX, rightY;
 	u_short ret;
+	const PsyXControllerMapping& primary = g_cfg_controllerMappings[(slot >= 0 && slot < 2) ? slot : 0];
 
 	if (!cont)
 	{
@@ -371,20 +413,22 @@ void PsyX_Pad_UpdateGameControllerInput(PsyXController* controller, LPPADRAW pad
 		return;
 	}
 
-	/* Primary binds AND the secondary (second-button-per-action) binds: active-low,
+	SDL_PumpEvents();
+
+	/* Primary binds (slot-specific for split-screen) AND secondary binds: active-low,
 	 * so an action reads pressed if EITHER mapping clears its bit. Analog sticks come
-	 * from the primary mapping's axes only. */
-	u_short w1 = PsyX_Pad_BuildPadWord(cont, g_cfg_controllerMapping,  controller->hystWord[0]);
+	 * from the slot-specific primary mapping's axes only. */
+	u_short w1 = PsyX_Pad_BuildPadWord(cont, primary, controller->hystWord[0]);
 	u_short w2 = PsyX_Pad_BuildPadWord(cont, g_cfg_controllerMapping2, controller->hystWord[1]);
 	controller->hystWord[0] = w1;
 	controller->hystWord[1] = w2;
 	ret = w1 & w2;
 
-	leftX = GetControllerButtonState(cont, g_cfg_controllerMapping.gc_axis_left_x);
-	leftY = GetControllerButtonState(cont, g_cfg_controllerMapping.gc_axis_left_y);
+	leftX = GetControllerButtonState(cont, primary.gc_axis_left_x);
+	leftY = GetControllerButtonState(cont, primary.gc_axis_left_y);
 
-	rightX = GetControllerButtonState(cont, g_cfg_controllerMapping.gc_axis_right_x);
-	rightY = GetControllerButtonState(cont, g_cfg_controllerMapping.gc_axis_right_y);
+	rightX = GetControllerButtonState(cont, primary.gc_axis_right_x);
+	rightY = GetControllerButtonState(cont, primary.gc_axis_right_y);
 
 	*(u_short*)pad->buttons = ret;
 

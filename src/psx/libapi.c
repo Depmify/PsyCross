@@ -633,6 +633,8 @@ typedef struct {
 
 static int  s_currentChannel = 0;
 static int  s_lastCardOk[2]  = { 0, 0 };
+static char s_saveDir[512]   = { 0 };
+static int  s_saveDirReady   = 0;
 
 /* PSX file-handle table for open()/read()/write()/lseek()/close().
  * We use small positive ints as handles (1..MC_DIR_ENTRY_COUNT). */
@@ -646,29 +648,122 @@ typedef struct {
 } McFileHandle;
 static McFileHandle s_handles[16] = { 0 };
 
+static int mc_handle_is_valid(int handle)
+{
+	if (handle < 1 || handle >= (int)(sizeof(s_handles)/sizeof(s_handles[0]))) return 0;
+	if (!s_handles[handle].used) return 0;
+	if ((s_handles[handle].channel & ~1) != 0) return 0;
+	if (s_handles[handle].dirIndex < 1 || s_handles[handle].dirIndex > MC_DIR_ENTRY_COUNT) return 0;
+	if (s_handles[handle].size <= 0 || s_handles[handle].size > MC_TOTAL_SIZE) return 0;
+	if (s_handles[handle].offset < 0 || s_handles[handle].offset > s_handles[handle].size) return 0;
+	return 1;
+}
+
+void PsyX_MemCardSetSaveDir(const char* path)
+{
+	if (!path || path[0] == '\0') {
+		s_saveDir[0] = '\0';
+		s_saveDirReady = 0;
+		return;
+	}
+
+	snprintf(s_saveDir, sizeof(s_saveDir), "%s", path);
+	for (char* p = s_saveDir; *p; p++) {
+		if (*p == '\\') *p = '/';
+	}
+	s_saveDirReady = 0;
+}
+
 /* Locate the gamedata/save directory; create it on first use. Returns
  * the static buffer (or NULL if creation fails — caller falls back to
  * cwd-relative path). On Windows mkdir(dirname) succeeds idempotently
  * via _mkdir which returns 0 on create / -1 + errno=EEXIST otherwise. */
 static const char* mc_save_dir(void)
 {
-	static char dir[64];
-	static int  s_initialised = 0;
-	if (!s_initialised) {
-		snprintf(dir, sizeof(dir), "gamedata/save");
+	static char dir[512];
+	if (!s_saveDirReady) {
+		if (s_saveDir[0] != '\0') {
+			snprintf(dir, sizeof(dir), "%s", s_saveDir);
+		} else {
+			snprintf(dir, sizeof(dir), "gamedata/save");
+		}
 #if defined(_WIN32)
 		_mkdir(dir);
 #else
 		mkdir(dir, 0755);
 #endif
-		s_initialised = 1;
+		s_saveDirReady = 1;
 	}
 	return dir;
 }
 
+static int mc_lan_save_path(char* out, size_t outSize, int chan, int fileIdx)
+{
+	const char* dir = mc_save_dir();
+	if (!out || outSize == 0 || !dir || fileIdx < 0)
+		return 0;
+
+	snprintf(out, outSize, "%s/%d.LAN%02d", dir, chan & 1, fileIdx);
+	return 1;
+}
+
+int PsyX_MemCardLanSaveWrite(int chan, int fileIdx, int saveIdx, const void* buf, int bytes)
+{
+	char path[1024];
+	FILE* f;
+
+	if (!buf || bytes <= 0 || saveIdx < 0)
+		return 0;
+	if (!mc_lan_save_path(path, sizeof(path), chan, fileIdx))
+		return 0;
+
+	f = fopen(path, "rb+");
+	if (!f)
+		f = fopen(path, "wb+");
+	if (!f)
+		return 0;
+
+	if (fseek(f, (long)saveIdx * bytes, SEEK_SET) != 0) {
+		fclose(f);
+		return 0;
+	}
+	if ((int)fwrite(buf, 1, bytes, f) != bytes) {
+		fclose(f);
+		return 0;
+	}
+
+	fflush(f);
+	fclose(f);
+	return 1;
+}
+
+int PsyX_MemCardLanSaveRead(int chan, int fileIdx, int saveIdx, void* buf, int bytes)
+{
+	char path[1024];
+	FILE* f;
+	int ok;
+
+	if (!buf || bytes <= 0 || saveIdx < 0)
+		return 0;
+	if (!mc_lan_save_path(path, sizeof(path), chan, fileIdx))
+		return 0;
+
+	f = fopen(path, "rb");
+	if (!f)
+		return 0;
+
+	if (fseek(f, (long)saveIdx * bytes, SEEK_SET) != 0) {
+		fclose(f);
+		return 0;
+	}
+	ok = ((int)fread(buf, 1, bytes, f) == bytes);
+	fclose(f);
+	return ok;
+}
+
 static const char* mc_path_for_channel(int chan)
 {
-	static char buf[96];
+	static char buf[1024];
 	const char* dir = mc_save_dir();
 	if (dir) {
 		snprintf(buf, sizeof(buf), "%s/%d.MCD", dir, chan);
@@ -729,6 +824,8 @@ static int mc_ensure_card(int chan)
 static int mc_read_at(int chan, long ofs, void* buf, int bytes)
 {
 	FILE* f = mc_fopen(chan, "rb");
+	if (!buf || bytes < 0 || ofs < 0 || ofs > MC_TOTAL_SIZE || bytes > MC_TOTAL_SIZE - ofs) return 0;
+	if (bytes == 0) return 1;
 	if (!f) return 0;
 	if (fseek(f, ofs, SEEK_SET) != 0) { fclose(f); return 0; }
 	size_t n = fread(buf, 1, bytes, f);
@@ -740,6 +837,8 @@ static int mc_read_at(int chan, long ofs, void* buf, int bytes)
 static int mc_write_at(int chan, long ofs, const void* buf, int bytes)
 {
 	FILE* f = mc_fopen(chan, "rb+");
+	if (!buf || bytes < 0 || ofs < 0 || ofs > MC_TOTAL_SIZE || bytes > MC_TOTAL_SIZE - ofs) return 0;
+	if (bytes == 0) return 1;
 	if (!f) {
 		/* card missing — auto-create then retry */
 		if (!mc_ensure_card(chan)) return 0;
@@ -966,30 +1065,31 @@ int open(char* path, unsigned int flags)
 
 int close(int handle)
 {
-	if (handle < 1 || handle >= (int)(sizeof(s_handles)/sizeof(s_handles[0]))) return -1;
-	if (!s_handles[handle].used) return -1;
+	if (!mc_handle_is_valid(handle)) return -1;
 	s_handles[handle].used = 0;
 	return 0;
 }
 
 int lseek(int handle, int offset, int whence)
 {
-	if (handle < 1 || handle >= (int)(sizeof(s_handles)/sizeof(s_handles[0]))) return -1;
-	if (!s_handles[handle].used) return -1;
+	if (!mc_handle_is_valid(handle)) return -1;
 	long base = 0;
 	if (whence == 0) base = 0;
 	else if (whence == 1) base = s_handles[handle].offset;
 	else if (whence == 2) base = s_handles[handle].size;
+	else return -1;
 	long p = base + offset;
-	if (p < 0) return -1;
+	if (p < 0 || p > s_handles[handle].size) return -1;
 	s_handles[handle].offset = p;
 	return (int)p;
 }
 
 int read(int handle, void* buf, int bytes)
 {
-	if (handle < 1 || handle >= (int)(sizeof(s_handles)/sizeof(s_handles[0]))) return -1;
-	if (!s_handles[handle].used) return -1;
+	if (!mc_handle_is_valid(handle)) return -1;
+	if (!buf || bytes < 0) return -1;
+	if (bytes == 0) return 0;
+	if (bytes > s_handles[handle].size - s_handles[handle].offset) return -1;
 	int chan = s_handles[handle].channel;
 	int dataBlock = s_handles[handle].dirIndex;  /* file occupies data blocks dirIndex..dirIndex+N-1 */
 	long fileBase = (long)dataBlock * MC_BLOCK_SIZE;
@@ -1002,8 +1102,10 @@ int read(int handle, void* buf, int bytes)
 
 int write(int handle, void* buf, int bytes)
 {
-	if (handle < 1 || handle >= (int)(sizeof(s_handles)/sizeof(s_handles[0]))) return -1;
-	if (!s_handles[handle].used) return -1;
+	if (!mc_handle_is_valid(handle)) return -1;
+	if (!buf || bytes < 0) return -1;
+	if (bytes == 0) return 0;
+	if (bytes > s_handles[handle].size - s_handles[handle].offset) return -1;
 	int chan = s_handles[handle].channel;
 	int dataBlock = s_handles[handle].dirIndex;
 	long fileBase = (long)dataBlock * MC_BLOCK_SIZE;

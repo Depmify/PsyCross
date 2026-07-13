@@ -93,6 +93,11 @@ extern void _boot(void);
 
 extern void ChangeClearPAD(int);
 
+/* PC-port extension: override the directory used for 0.MCD / 1.MCD. */
+extern void PsyX_MemCardSetSaveDir(const char* path);
+extern int PsyX_MemCardLanSaveWrite(int chan, int fileIdx, int saveIdx, const void* buf, int bytes);
+extern int PsyX_MemCardLanSaveRead(int chan, int fileIdx, int saveIdx, void* buf, int bytes);
+
 /* prototypes added by shino 96/05/22 */
 extern void InitCARD(int val);
 extern int StartCARD();

@@ -14,6 +14,27 @@
 #include <assert.h>
 #include <ctype.h>
 
+#ifdef _WIN32
+typedef struct _PSYX_MEMORY_BASIC_INFORMATION {
+	void* BaseAddress;
+	void* AllocationBase;
+	unsigned long AllocationProtect;
+	size_t RegionSize;
+	unsigned long State;
+	unsigned long Protect;
+	unsigned long Type;
+} PSYX_MEMORY_BASIC_INFORMATION;
+__declspec(dllimport) size_t __stdcall VirtualQuery(const void* address, PSYX_MEMORY_BASIC_INFORMATION* buffer, size_t length);
+#define PSYX_MEM_COMMIT              0x1000u
+#define PSYX_PAGE_NOACCESS           0x01u
+#define PSYX_PAGE_READONLY           0x02u
+#define PSYX_PAGE_READWRITE          0x04u
+#define PSYX_PAGE_WRITECOPY          0x08u
+#define PSYX_PAGE_EXECUTE_READ       0x20u
+#define PSYX_PAGE_EXECUTE_READWRITE  0x40u
+#define PSYX_PAGE_EXECUTE_WRITECOPY  0x80u
+#define PSYX_PAGE_GUARD              0x100u
+#endif
 
 #include "PsyX/PsyX_globals.h"
 #include "../PsyX_main.h"
@@ -22,6 +43,51 @@
 int g_dbg_emulatorPaused = 0;
 
 void(*drawsync_callback)(void) = NULL;
+
+static int PsyXMemoryRangeAccessible(const void* ptr, size_t bytes, int writeRequired)
+{
+#ifdef _WIN32
+	const unsigned char* cur;
+	const unsigned char* end;
+
+	if (ptr == NULL || bytes == 0 || (uintptr_t)ptr > UINTPTR_MAX - bytes)
+		return 0;
+
+	cur = (const unsigned char*)ptr;
+	end = cur + bytes;
+	while (cur < end)
+	{
+		PSYX_MEMORY_BASIC_INFORMATION mbi;
+		uintptr_t regionEnd;
+		int readable;
+		int writable;
+
+		if (VirtualQuery(cur, &mbi, sizeof(mbi)) == 0)
+			return 0;
+
+		readable = (mbi.Protect & (PSYX_PAGE_READONLY | PSYX_PAGE_READWRITE | PSYX_PAGE_WRITECOPY |
+								   PSYX_PAGE_EXECUTE_READ | PSYX_PAGE_EXECUTE_READWRITE | PSYX_PAGE_EXECUTE_WRITECOPY)) != 0;
+		writable = (mbi.Protect & (PSYX_PAGE_READWRITE | PSYX_PAGE_WRITECOPY |
+								   PSYX_PAGE_EXECUTE_READWRITE | PSYX_PAGE_EXECUTE_WRITECOPY)) != 0;
+		if (mbi.State != PSYX_MEM_COMMIT ||
+			(mbi.Protect & (PSYX_PAGE_NOACCESS | PSYX_PAGE_GUARD)) ||
+			(writeRequired ? !writable : !readable))
+		{
+			return 0;
+		}
+
+		regionEnd = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+		if (regionEnd <= (uintptr_t)cur)
+			return 0;
+
+		cur = (const unsigned char*)regionEnd;
+	}
+
+	return 1;
+#else
+	return ptr != NULL && bytes != 0;
+#endif
+}
 
 int ClearImage(RECT16* rect, u_char r, u_char g, u_char b)
 {
@@ -356,6 +422,12 @@ DRAWENV* SetDefDrawEnv(DRAWENV* env, int x, int y, int w, int h)//(F)
 
 void SetDrawEnv(DR_ENV* dr_env, DRAWENV* env)
 {
+	if (!PsyXMemoryRangeAccessible(dr_env, sizeof(*dr_env), 1) ||
+		!PsyXMemoryRangeAccessible(env, sizeof(*env), 0))
+	{
+		return;
+	}
+
 	dr_env->code[0] = ((env->clip.y & 0x3FF) << 10) | env->clip.x & 0x3FF | 0xE3000000;
 	dr_env->code[1] = (((env->clip.y + env->clip.h - 1) & 0x3FF) << 10) | (env->clip.x + env->clip.w - 1) & 0x3FF | 0xE4000000;
 	dr_env->code[2] = ((env->ofs[1] & 0x3FF) << 11) | env->ofs[0] & 0x7FF | 0xE5000000;
@@ -369,6 +441,16 @@ void SetDrawEnv(DR_ENV* dr_env, DRAWENV* env)
 
 void SetDrawMode(DR_MODE* p, int dfe, int dtd, int tpage, RECT16* tw)
 {
+	if (!PsyXMemoryRangeAccessible(p, sizeof(*p), 1))
+	{
+		return;
+	}
+
+	if (tw != NULL && !PsyXMemoryRangeAccessible(tw, sizeof(*tw), 0))
+	{
+		tw = NULL;
+	}
+
 	setDrawMode(p, dfe, dtd, tpage, tw);
 }
 

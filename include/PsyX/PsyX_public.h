@@ -51,6 +51,7 @@ extern "C" {
 /* Mapped inputs */
 extern PsyXControllerMapping		g_cfg_controllerMapping;
 extern PsyXControllerMapping		g_cfg_controllerMapping2;	/* PC: secondary controller binds (second button per action, AND-combined) */
+extern PsyXControllerMapping		g_cfg_controllerMappings[2];	/* PC: per-slot primary controller binds for split-screen windows */
 extern PsyXKeyboardMapping			g_cfg_keyboardMapping;
 extern PsyXKeyboardMapping			g_cfg_keyboardMapping2;		/* PC: secondary keyboard binds (active w/ allow_mouse_secondary) */
 extern int							g_cfg_controllerToSlotMapping[2];
@@ -124,6 +125,16 @@ extern float						g_PsyX_FlashlightInnerCos;   /* cos(inner half-angle) */
 extern float						g_PsyX_FlashlightOuterCos;   /* cos(outer half-angle) */
 extern float						g_PsyX_FlashlightRange;      /* distance falloff, view-space units */
 
+/* Optional second gameplay flashlight used by multiplayer peers. It shares the
+ * selected Classic/Modern style and beam calibration with the primary light,
+ * while keeping an independent transform, intensity ramp, and shadow map. */
+extern int							g_PsyX_RemoteFlashlightActive;
+extern float						g_PsyX_RemoteFlashlightPos[3];
+extern float						g_PsyX_RemoteFlashlightShadowPos[3];
+extern float						g_PsyX_RemoteFlashlightDir[3];
+extern float						g_PsyX_RemoteFlashlightColor[3];
+extern float						g_PsyX_RemoteFlashlightIntensityScale;
+
 /* PC port (Silent Hill): runtime master gate for PGXP perspective correction.
  * Set this from game code AFTER PsyX_Initialise. When the binary is built with
  * USE_PGXP=1 but this is 0, the prim emitters write a_zw=0 so the shader takes
@@ -191,6 +202,8 @@ extern int PsyX_LookupKeyboardMapping(const char* str, int default_value);
 
 /* Returns controller mapping index */
 extern int PsyX_LookupGameControllerMapping(const char* str, int default_value);
+
+struct _RECT16;
 
 /* Screen size of emulated PSX viewport with widescreen offsets */
 extern void PsyX_GetPSXWidescreenMappedViewport(struct _RECT16* rect);

@@ -154,7 +154,7 @@ static const VsEntry* Vs_Get(const void* addr, unsigned value) {
  * fired when g_PsyX_UsePerPixelFlashlight). The packed vertex word is already at
  * addr when the hook fires (same contract as PGXP's Shadow_Store). */
 extern "C" void VShadow_Store(void* addr, float vx, float vy, float vz) {
-	Vs_Put(addr, vx, vy, vz, g_PsyX_NoShadowCast ? 1.0f : 0.0f, *(const unsigned*)addr);
+	Vs_Put(addr, vx, vy, vz, (float)g_PsyX_NoShadowCast, *(const unsigned*)addr);
 }
 
 /* Drawer copy hook (DuckStation CPU MOVE/SW): the game just did *dst = *src (a
@@ -1579,22 +1579,24 @@ void DrawSplit(const GPUDrawSplit& split)
 
 extern int g_dbg_polygonSelected;
 
-static bool ShadowTriangleCanCast(const GrVertex* vertex)
+static bool ShadowTriangleCanCast(const GrVertex* vertex, int lightIndex)
 {
+	const int noCastBit = 1 << lightIndex;
 	for (int i = 0; i < 3; i++)
 	{
-		if (vertex[i].ny < 0.5f || vertex[i].nx > 0.5f || !(vertex[i].vsz > 0.0f))
+		const int noCastMask = (int)(vertex[i].nx + 0.5f);
+		if (vertex[i].ny < 0.5f || (noCastMask & noCastBit) != 0 || !(vertex[i].vsz > 0.0f))
 			return false;
 	}
 	return true;
 }
 
-static void DrawShadowCasters(const GPUDrawSplit& split)
+static void DrawShadowCasters(const GPUDrawSplit& split, int lightIndex)
 {
 	int runStart = -1;
 	for (int offset = 0; offset + 2 < split.numVerts; offset += 3)
 	{
-		if (ShadowTriangleCanCast(&g_vertexBuffer[split.startVertex + offset]))
+		if (ShadowTriangleCanCast(&g_vertexBuffer[split.startVertex + offset], lightIndex))
 		{
 			if (runStart < 0)
 				runStart = offset;
@@ -1627,12 +1629,9 @@ void DrawAllSplits()
 
 			eprintf("==========================================\n");
 			eprintf("POLYGON: %d\n", g_dbg_polygonSelected);
-			eprintf("X: %d Y: %d
-", vert->x, vert->y);
-			eprintf("U: %d V: %d
-", vert->u, vert->v);
-			eprintf("TP: %d CLT: %d
-", vert->page, vert->clut);
+			eprintf("X: %d Y: %d\n", vert->x, vert->y);
+			eprintf("U: %d V: %d\n", vert->u, vert->v);
+			eprintf("TP: %d CLT: %d\n", vert->page, vert->clut);
 			
 			eprintf("==========================================\n");
 		}
@@ -1653,9 +1652,12 @@ void DrawAllSplits()
 	 * for the frame or two it existed). Caster eligibility is checked per
 	 * triangle so an invalid or suppressed vertex cannot stretch the remaining
 	 * vertices into a false shadow. */
-	if (GR_FlashlightShadowActive())
+	for (int lightIndex = 0; lightIndex < 2; lightIndex++)
 	{
-		GR_ShadowPassBegin();
+		if (!GR_FlashlightShadowActive(lightIndex))
+			continue;
+
+		GR_ShadowPassBegin(lightIndex);
 		for (int i = 1; i <= g_splitIndex; i++)
 		{
 			const GPUDrawSplit& s = g_splits[i];
@@ -1663,7 +1665,7 @@ void DrawAllSplits()
 				continue;
 			if (s.blendMode != BM_NONE)
 				continue;
-			DrawShadowCasters(s);
+			DrawShadowCasters(s, lightIndex);
 		}
 		GR_ShadowPassEnd();
 	}

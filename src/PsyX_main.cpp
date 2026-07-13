@@ -54,6 +54,7 @@ PsyXKeyboardMapping			g_cfg_keyboardMapping;
 PsyXKeyboardMapping			g_cfg_keyboardMapping2 = {0};	/* secondary binds; 0 = SDL_SCANCODE_UNKNOWN (unset) */
 PsyXControllerMapping		g_cfg_controllerMapping;
 PsyXControllerMapping		g_cfg_controllerMapping2;	/* secondary controller binds; all fields BUTTON_INVALID (unset) until configured */
+PsyXControllerMapping		g_cfg_controllerMappings[2];	/* per-slot primary controller binds for split-screen windows */
 int							g_cfg_allowMouseSecondary = 0;
 unsigned short				g_cfg_mouseButtonMask[8] = {0};	/* [SDL button 1..5] -> PSX button bitmask */
 GameOnTextInputHandler		g_cfg_gameOnTextInput = NULL;
@@ -307,6 +308,8 @@ static void PsyX_Sys_InitialiseInput()
 	g_cfg_controllerMapping.gc_axis_left_y = SDL_CONTROLLER_AXIS_LEFTY | CONTROLLER_MAP_FLAG_AXIS;
 	g_cfg_controllerMapping.gc_axis_right_x = SDL_CONTROLLER_AXIS_RIGHTX | CONTROLLER_MAP_FLAG_AXIS;
 	g_cfg_controllerMapping.gc_axis_right_y = SDL_CONTROLLER_AXIS_RIGHTY | CONTROLLER_MAP_FLAG_AXIS;
+	g_cfg_controllerMappings[0] = g_cfg_controllerMapping;
+	g_cfg_controllerMappings[1] = g_cfg_controllerMapping;
 
 	/* Secondary controller binds default to all-unset (every field
 	 * SDL_CONTROLLER_BUTTON_INVALID == -1). The game's Pc_ApplyControlConfig sets
@@ -709,7 +712,9 @@ void PsyX_Initialise(char* appName, int width, int height, int fullscreen)
 	g_appNameStr = appName;
 
 	std::set_terminate(sh_terminate_handler);
-	InstallExceptionHandler();
+	/* Silent Hill: United installs its own richer crash filter in main_pc.c.
+	 * Leave the legacy PsyCross SEH handler disabled so dumps/logs reflect
+	 * the original fault instead of competing crash handlers. */
 
 	PsyX_Log_Initialise();
 	PsyX_GetWindowName(windowNameStr);
@@ -729,6 +734,10 @@ void PsyX_Initialise(char* appName, int width, int height, int fullscreen)
 #if defined(__EMSCRIPTEN__)
 	SDL_SetHint(SDL_HINT_EMSCRIPTEN_ASYNCIFY, "0");
 #endif
+
+	/* Local splitscreen runs two independent SDL windows. Only one can own OS
+	 * focus, so controller input must keep flowing to the background process. */
+	SDL_SetHintWithPriority(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1", SDL_HINT_OVERRIDE);
 	
 	if (SDL_Init(SDL_INIT_VIDEO) != 0)
 	{
@@ -786,10 +795,13 @@ int g_activeKeyboardControllers = 0x1;
 int g_altKeyState = 0;
 
 /* Mouse wheel is event-based (a notch, not a held state), so latch each scroll
- * for a few pad reads to give the game clean press/release edges — a scroll
- * bound to a PSX button then acts as a tap. Consumed in PsyX_Pad_BuildMouseWord. */
+ * for a few pad reads to give the game clean press/release edges. */
 int g_PsyX_WheelUpFrames   = 0;
 int g_PsyX_WheelDownFrames = 0;
+
+extern "C" int PcCoop_P2SecondWindowIsEventWindow(unsigned int windowId);
+extern "C" void PcCoop_P2SecondWindowClose(void);
+
 
 void PsyX_Sys_DoPollEvent()
 {
@@ -808,6 +820,12 @@ void PsyX_Sys_DoPollEvent()
 				PsyX_Exit();
 				break;
 			case SDL_WINDOWEVENT:
+				if (PcCoop_P2SecondWindowIsEventWindow(event.window.windowID))
+				{
+					if (event.window.event == SDL_WINDOWEVENT_CLOSE)
+						PcCoop_P2SecondWindowClose();
+					break;
+				}
 				switch (event.window.event)
 				{
 				case SDL_WINDOWEVENT_RESIZED:
@@ -821,6 +839,8 @@ void PsyX_Sys_DoPollEvent()
 				}
 				break;
 			case SDL_MOUSEMOTION:
+				if (PcCoop_P2SecondWindowIsEventWindow(event.motion.windowID))
+					break;
 
 				PsyX_Sys_DoDebugMouseMotion(event.motion.x, event.motion.y);
 				break;
@@ -840,6 +860,9 @@ void PsyX_Sys_DoPollEvent()
 			case SDL_KEYDOWN:
 			case SDL_KEYUP:
 			{
+				if (PcCoop_P2SecondWindowIsEventWindow(event.key.windowID))
+					break;
+
 				int nKey = event.key.keysym.scancode;
 
 				if (nKey == SDL_SCANCODE_RALT)
@@ -1264,6 +1287,9 @@ void PsyX_Shutdown()
 	}
 	SHUTDOWN_STAGE("vblank thread joined");
 
+	PcCoop_P2SecondWindowClose();
+	SHUTDOWN_STAGE("coop p2 window destroyed");
+
 	SDL_DestroyWindow(g_window);
 	g_window = NULL;
 	SHUTDOWN_STAGE("window destroyed");
@@ -1276,8 +1302,7 @@ void PsyX_Shutdown()
 	SDL_Quit();
 	SHUTDOWN_STAGE("SDL_Quit done");
 
-	UnInstallExceptionHandler();
-	SHUTDOWN_STAGE("exception handler uninstalled");
+	SHUTDOWN_STAGE("legacy exception handler skipped");
 
 	PsyX_Log_Finalise();
 }

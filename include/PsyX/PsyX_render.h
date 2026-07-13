@@ -235,6 +235,8 @@ extern void			GR_SetStencilMode(int drawPrim);
 extern void			GR_EnableDepth(int enable);
 extern void			GR_SetScissorState(int enable);
 extern void			GR_SetOffscreenState(const RECT16* offscreenRect, int enable);
+extern void			GR_ResetOffscreenState(void);
+extern void			GR_InvalidateLastFrame(void);
 extern void			GR_SetupClipMode(const RECT16* clipRect, int enable);
 extern void			GR_SetViewPort(int x, int y, int width, int height);
 extern void			GR_SetTexture(TextureID texture, TexFormat texFormat);
@@ -251,8 +253,8 @@ extern void			GR_DrawTriangles(int start_vertex, int triangles);
  * GR_ShadowPassBegin() once after GR_UpdateVertexBuffer while the frame VAO is
  * still bound, replay opaque split ranges via GR_ShadowPassDraw(), then
  * GR_ShadowPassEnd(). Guarded by GR_FlashlightShadowActive(). */
-extern int			GR_FlashlightShadowActive(void);
-extern void			GR_ShadowPassBegin(void);
+extern int			GR_FlashlightShadowActive(int lightIndex);
+extern void			GR_ShadowPassBegin(int lightIndex);
 extern void			GR_ShadowPassDraw(int start_vertex, int num_verts);
 extern void			GR_ShadowPassEnd(void);
 

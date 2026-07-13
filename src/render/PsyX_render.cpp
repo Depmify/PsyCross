@@ -16,6 +16,7 @@
 
 #include <assert.h>
 #include <string.h>
+#include <math.h>
 
 #ifdef _WIN32
 
@@ -47,8 +48,132 @@ extern "C" {
 
 #endif
 
-extern SDL_Window* g_window;
+#ifndef PSYX_HAS_POSTPROCESS
+#define PSYX_HAS_POSTPROCESS USE_OPENGL
+#endif
 
+extern SDL_Window* g_window;
+extern int g_PreviousScissorState;
+extern int g_PreviousOffscreenState;
+extern ShaderID g_PreviousShader;
+extern TextureID g_lastBoundTexture;
+
+static SDL_Window* g_pcCoopP2Window = NULL;
+static SDL_Window* g_pcCoopSavedCurrentWindow = NULL;
+static SDL_GLContext g_pcCoopSavedGlContext = NULL;
+static GLint g_pcCoopSavedViewport[4];
+static GLint g_pcCoopSavedScissorBox[4];
+static GLboolean g_pcCoopSavedScissorEnabled = GL_FALSE;
+static int g_pcCoopSavedWindowWidth = 0;
+static int g_pcCoopSavedWindowHeight = 0;
+static int g_pcCoopP2WindowActive = 0;
+
+extern "C" int PcCoop_P2SecondWindowBegin(void)
+{
+#if defined(RENDERER_OGL) || defined(RENDERER_OGLES)
+	SDL_GLContext currentContext;
+	int w;
+	int h;
+
+	if (g_pcCoopP2WindowActive || g_window == NULL)
+		return 0;
+
+	currentContext = SDL_GL_GetCurrentContext();
+	if (currentContext == NULL)
+		return 0;
+
+	SDL_GetWindowSize(g_window, &w, &h);
+	if (w <= 1 || h <= 1)
+		return 0;
+
+	if (g_pcCoopP2Window == NULL)
+	{
+		g_pcCoopP2Window = SDL_CreateWindow("Silent Hill - P2",
+		                                    SDL_WINDOWPOS_UNDEFINED,
+		                                    SDL_WINDOWPOS_UNDEFINED,
+		                                    w,
+		                                    h,
+		                                    SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
+		if (g_pcCoopP2Window == NULL)
+			return 0;
+	}
+
+	g_pcCoopSavedCurrentWindow = SDL_GL_GetCurrentWindow();
+	g_pcCoopSavedGlContext = currentContext;
+	glGetIntegerv(GL_VIEWPORT, g_pcCoopSavedViewport);
+	glGetIntegerv(GL_SCISSOR_BOX, g_pcCoopSavedScissorBox);
+	g_pcCoopSavedScissorEnabled = glIsEnabled(GL_SCISSOR_TEST);
+
+	if (SDL_GL_MakeCurrent(g_pcCoopP2Window, currentContext) != 0)
+		return 0;
+
+	SDL_GetWindowSize(g_pcCoopP2Window, &w, &h);
+	g_pcCoopSavedWindowWidth = g_windowWidth;
+	g_pcCoopSavedWindowHeight = g_windowHeight;
+	g_windowWidth = w;
+	g_windowHeight = h;
+
+	glViewport(0, 0, w, h);
+	glScissor(0, 0, w, h);
+	glEnable(GL_SCISSOR_TEST);
+	glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+	g_pcCoopP2WindowActive = 1;
+	return 1;
+#else
+	return 0;
+#endif
+}
+
+extern "C" void PcCoop_P2SecondWindowEnd(void)
+{
+#if defined(RENDERER_OGL) || defined(RENDERER_OGLES)
+	if (!g_pcCoopP2WindowActive)
+		return;
+
+	SDL_GL_SwapWindow(g_pcCoopP2Window);
+	SDL_GL_MakeCurrent(g_pcCoopSavedCurrentWindow != NULL ? g_pcCoopSavedCurrentWindow : g_window,
+	                   g_pcCoopSavedGlContext);
+
+	glViewport(g_pcCoopSavedViewport[0],
+	           g_pcCoopSavedViewport[1],
+	           g_pcCoopSavedViewport[2],
+	           g_pcCoopSavedViewport[3]);
+	glScissor(g_pcCoopSavedScissorBox[0],
+	          g_pcCoopSavedScissorBox[1],
+	          g_pcCoopSavedScissorBox[2],
+	          g_pcCoopSavedScissorBox[3]);
+
+	if (g_pcCoopSavedScissorEnabled)
+		glEnable(GL_SCISSOR_TEST);
+	else
+		glDisable(GL_SCISSOR_TEST);
+
+	g_windowWidth = g_pcCoopSavedWindowWidth;
+	g_windowHeight = g_pcCoopSavedWindowHeight;
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	g_PreviousScissorState = -1;
+	g_PreviousOffscreenState = -1;
+	g_PreviousShader = (ShaderID)-1;
+	g_lastBoundTexture = (TextureID)-1;
+	g_pcCoopP2WindowActive = 0;
+#endif
+}
+
+extern "C" int PcCoop_P2SecondWindowIsEventWindow(unsigned int windowId)
+{
+	return g_pcCoopP2Window != NULL && SDL_GetWindowID(g_pcCoopP2Window) == windowId;
+}
+
+extern "C" void PcCoop_P2SecondWindowClose(void)
+{
+	if (g_pcCoopP2Window != NULL)
+	{
+		SDL_DestroyWindow(g_pcCoopP2Window);
+		g_pcCoopP2Window = NULL;
+	}
+	g_pcCoopP2WindowActive = 0;
+}
 
 #define MAX_NUM_VERTEX_BUFFERS		(2)
 #define PSX_SCREEN_ASPECT	(240.0f / 320.0f)			// PSX screen is mapped always to this aspect
@@ -98,6 +223,7 @@ int   g_PsxUIOrthoPass = 0;
 float g_PsxWorldHScale = 1.0f;
 }
 #define PSX_NTSC_PIXEL_ASPECT (g_PsxPixelAspect)
+
 
 int g_PreviousBlendMode = BM_NONE;
 int g_PreviousDepthMode = 0;
@@ -226,8 +352,8 @@ float g_PsyX_FlashlightShadowStrength = 1.0f;
 float g_PsyX_FlashlightShadowFadeDist = 0.0f;
 /* The shadow frustum's near/far, published by GR_BuildShadowMatrix so the cone
  * shader can linearize shadow-map depth for the contact fade above. */
-static float g_shadowZNear = 20.0f;
-static float g_shadowZFar  = 5200.0f;
+static float g_shadowZNear[2] = { 20.0f, 20.0f };
+static float g_shadowZFar[2]  = { 5200.0f, 5200.0f };
 
 /* PC port: per-frame flashlight cone parameters (view space), set by game code.
  * The shader consumes them only when (g_PsyX_UsePerPixelFlashlight &&
@@ -253,6 +379,12 @@ float g_PsyX_FlashlightColor[3] = { 1.0f, 1.0f, 1.0f };
 float g_PsyX_FlashlightInnerCos = 0.94f;  /* ~20 deg */
 float g_PsyX_FlashlightOuterCos = 0.76f;  /* ~41 deg */
 float g_PsyX_FlashlightRange    = 4000.0f;
+int   g_PsyX_RemoteFlashlightActive = 0;
+float g_PsyX_RemoteFlashlightPos[3] = { 0.0f, 0.0f, 0.0f };
+float g_PsyX_RemoteFlashlightShadowPos[3] = { 0.0f, 0.0f, 0.0f };
+float g_PsyX_RemoteFlashlightDir[3] = { 0.0f, 0.0f, 1.0f };
+float g_PsyX_RemoteFlashlightColor[3] = { 1.0f, 1.0f, 1.0f };
+float g_PsyX_RemoteFlashlightIntensityScale = 1.0f;
 /* PC port: flashlight cone coverage-area multiplier, applied to Inner/OuterCos at
  * push time (1.0 = base cone; 1.5 default = ~1.5x coverage). Live-editable via
  * [ / ] + backslash and persisted as config key flashlight_size. */
@@ -767,6 +899,21 @@ typedef struct
 	GLint shadowStrengthLoc;
 	GLint shadowClipLoc;
 	GLint shadowFadeDistLoc;
+	GLint flashlight2OnLoc;
+	GLint fl2LightPosLoc;
+	GLint fl2DirLoc;
+	GLint fl2ColorLoc;
+	GLint fl2InnerCosLoc;
+	GLint fl2OuterCosLoc;
+	GLint fl2RangeLoc;
+	GLint shadow2OnLoc;
+	GLint shadow2MatrixLoc;
+	GLint shadow2BiasLoc;
+	GLint shadow2TexelLoc;
+	GLint shadow2NormalOffsetLoc;
+	GLint shadow2StrengthLoc;
+	GLint shadow2ClipLoc;
+	GLint shadow2FadeDistLoc;
 #endif
 } GTEShader;
 
@@ -805,16 +952,48 @@ GLint u_shadowNormalOffsetLoc;
 GLint u_shadowStrengthLoc;
 GLint u_shadowClipLoc;
 GLint u_shadowFadeDistLoc;
+GLint u_flashlight2OnLoc;
+GLint u_fl2LightPosLoc;
+GLint u_fl2DirLoc;
+GLint u_fl2ColorLoc;
+GLint u_fl2InnerCosLoc;
+GLint u_fl2OuterCosLoc;
+GLint u_fl2RangeLoc;
+GLint u_shadow2OnLoc;
+GLint u_shadow2MatrixLoc;
+GLint u_shadow2BiasLoc;
+GLint u_shadow2TexelLoc;
+GLint u_shadow2NormalOffsetLoc;
+GLint u_shadow2StrengthLoc;
+GLint u_shadow2ClipLoc;
+GLint u_shadow2FadeDistLoc;
 
 /* Flashlight shadow map (see g_PsyX_UseFlashlightShadows). Depth-only FBO rendered
  * from the light POV each frame; g_shadowLightMatrix maps view space -> light clip.
  * Column-major, identity until the first shadow pass computes it. */
 #define PSYX_SHADOW_MAP_SIZE 1024
 static GLuint g_shadowFBO = 0;
-static GLuint g_shadowDepthTex = 0;
+static GLuint g_shadowDepthTex[2] = { 0, 0 };
 static ShaderID g_shadowDepthShader = (ShaderID)-1;
 static GLint g_shadowDepthMatrixLoc = -1;
-static float g_shadowLightMatrix[16] = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };
+static float g_shadowLightMatrix[2][16] = {
+	{ 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 },
+	{ 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 }
+};
+static int g_shadowPassIndex = -1;
+
+#if PSYX_HAS_POSTPROCESS
+static GLuint g_postFBO = 0;
+static GLuint g_postTex = 0;
+static GLuint g_postVAO = 0;
+static ShaderID g_postShader = (ShaderID)-1;
+static GLint g_postModeLoc = -1;
+static GLint g_postToneLoc = -1;
+static GLint g_postIntensityLoc = -1;
+static GLint g_postToneIntensityLoc = -1;
+static int g_postW = 0;
+static int g_postH = 0;
+#endif
 
 float g_PsyX_FogColor[3] = { 0.0f, 0.0f, 0.0f };
 /* World fog density multiplier. 1.0 = native PC shader fog; >1 deepens it toward the
@@ -1093,10 +1272,119 @@ int g_PsxFogToBlack = 0;
 	"	uniform float u_shadowStrength;\n"\
 	"	uniform vec2 u_shadowClip;\n"\
 	"	uniform float u_shadowFadeDist;\n"\
-	/* Window depth [0,1] -> linear distance along the light's forward axis, using the shadow frustum's near/far (u_shadowClip). Lets us measure how far a receiver sits BEHIND its occluder in world units. */\
-	"	float shLinDepth(float zw) {\n"\
+	"	uniform int u_flashlight2On;\n"\
+	"	uniform vec3 u_fl2LightPos;\n"\
+	"	uniform vec3 u_fl2Dir;\n"\
+	"	uniform vec3 u_fl2Color;\n"\
+	"	uniform float u_fl2InnerCos;\n"\
+	"	uniform float u_fl2OuterCos;\n"\
+	"	uniform float u_fl2Range;\n"\
+	"	uniform int u_shadow2On;\n"\
+	"	uniform sampler2D u_shadow2Tex;\n"\
+	"	uniform mat4 u_shadow2Matrix;\n"\
+	"	uniform float u_shadow2Bias;\n"\
+	"	uniform vec2 u_shadow2Texel;\n"\
+	"	uniform float u_shadow2NormalOffset;\n"\
+	"	uniform float u_shadow2Strength;\n"\
+	"	uniform vec2 u_shadow2Clip;\n"\
+	"	uniform float u_shadow2FadeDist;\n"\
+	"	float shLinDepth(float zw, vec2 clipRange) {\n"\
 	"		float ndc = zw * 2.0 - 1.0;\n"\
-	"		return (2.0 * u_shadowClip.x * u_shadowClip.y) / (u_shadowClip.y + u_shadowClip.x - ndc * (u_shadowClip.y - u_shadowClip.x));\n"\
+	"		return (2.0 * clipRange.x * clipRange.y) / (clipRange.y + clipRange.x - ndc * (clipRange.y - clipRange.x));\n"\
+	"	}\n"\
+	"	float shVisibility(int lightIndex, vec3 flShadowP, vec3 L, float d) {\n"\
+	"		int shadowOn;\n"\
+	"		mat4 shadowMatrix;\n"\
+	"		float shadowBias;\n"\
+	"		vec2 shadowTexel;\n"\
+	"		float shadowNormalOffset;\n"\
+	"		float shadowStrength;\n"\
+	"		vec2 shadowClip;\n"\
+	"		float shadowFadeDist;\n"\
+	"		if (lightIndex == 0) {\n"\
+	"			shadowOn = u_shadowOn; shadowMatrix = u_shadowMatrix; shadowBias = u_shadowBias;\n"\
+	"			shadowTexel = u_shadowTexel; shadowNormalOffset = u_shadowNormalOffset; shadowStrength = u_shadowStrength;\n"\
+	"			shadowClip = u_shadowClip; shadowFadeDist = u_shadowFadeDist;\n"\
+	"		} else {\n"\
+	"			shadowOn = u_shadow2On; shadowMatrix = u_shadow2Matrix; shadowBias = u_shadow2Bias;\n"\
+	"			shadowTexel = u_shadow2Texel; shadowNormalOffset = u_shadow2NormalOffset; shadowStrength = u_shadow2Strength;\n"\
+	"			shadowClip = u_shadow2Clip; shadowFadeDist = u_shadow2FadeDist;\n"\
+	"		}\n"\
+	"		if (shadowOn <= 0) return 1.0;\n"\
+	"		vec3 flPs = flShadowP + L * (shadowNormalOffset * d);\n"\
+	"		vec4 lp = shadowMatrix * vec4(flPs, 1.0);\n"\
+	"		if (lp.w <= 0.0) return 1.0;\n"\
+	"		vec3 luv = lp.xyz / lp.w * 0.5 + 0.5;\n"\
+	"		if (luv.x <= 0.0 || luv.x >= 1.0 || luv.y <= 0.0 || luv.y >= 1.0 || luv.z >= 1.0) return 1.0;\n"\
+	"		vec3 luvDx = dFdx(luv);\n"\
+	"		vec3 luvDy = dFdy(luv);\n"\
+	"		float det = luvDx.x * luvDy.y - luvDx.y * luvDy.x;\n"\
+	"		float dzdu = 0.0;\n"\
+	"		float dzdv = 0.0;\n"\
+	"		if (abs(det) > 1e-9) {\n"\
+	"			dzdu = (luvDx.z * luvDy.y - luvDy.z * luvDx.y) / det;\n"\
+	"			dzdv = (luvDy.z * luvDx.x - luvDx.z * luvDy.x) / det;\n"\
+	"		}\n"\
+	"		float recvLin = (shadowFadeDist > 0.0) ? shLinDepth(luv.z, shadowClip) : 0.0;\n"\
+	"		float occ = 0.0;\n"\
+	"		vec2 texelPos = luv.xy / shadowTexel - vec2(0.5);\n"\
+	"		vec2 texelBase = floor(texelPos);\n"\
+	"		vec2 texelFrac = fract(texelPos);\n"\
+	"		for (int sy = -1; sy <= 2; sy++) {\n"\
+	"			float wy = (sy == -1) ? (1.0 - texelFrac.y) : ((sy == 2) ? texelFrac.y : 1.0);\n"\
+	"			for (int sx = -1; sx <= 2; sx++) {\n"\
+	"				float wx = (sx == -1) ? (1.0 - texelFrac.x) : ((sx == 2) ? texelFrac.x : 1.0);\n"\
+	"				float weight = wx * wy;\n"\
+	"				vec2 suv = (texelBase + vec2(float(sx), float(sy)) + vec2(0.5)) * shadowTexel;\n"\
+	"				float sd;\n"\
+	"				if (lightIndex == 0) sd = texture2D(u_shadowTex, suv).r; else sd = texture2D(u_shadow2Tex, suv).r;\n"\
+	"				float receiverDepth = luv.z + dzdu * (suv.x - luv.x) + dzdv * (suv.y - luv.y);\n"\
+	"				if (receiverDepth - shadowBias > sd) {\n"\
+	"					if (shadowFadeDist > 0.0) {\n"\
+	"						float gap = recvLin - shLinDepth(sd, shadowClip);\n"\
+	"						occ += weight * (1.0 - clamp(gap / shadowFadeDist, 0.0, 1.0));\n"\
+	"					} else { occ += weight; }\n"\
+	"				}\n"\
+	"			}\n"\
+	"		}\n"\
+	"		return 1.0 - shadowStrength * (occ / 9.0);\n"\
+	"	}\n"\
+	"	vec3 flEvaluate(int lightIndex, vec3 flP, vec3 flShadowP, vec3 flAlbedo) {\n"\
+	"		int lightEnabled; vec3 lightPos; vec3 lightDir; vec3 lightColor; float innerCos; float outerCos; float lightRange;\n"\
+	"		if (lightIndex == 0) {\n"\
+	"			lightEnabled = u_flashlightOn; lightPos = u_flLightPos; lightDir = u_flDir; lightColor = u_flColor;\n"\
+	"			innerCos = u_flInnerCos; outerCos = u_flOuterCos; lightRange = u_flRange;\n"\
+	"		} else {\n"\
+	"			lightEnabled = u_flashlight2On; lightPos = u_fl2LightPos; lightDir = u_fl2Dir; lightColor = u_fl2Color;\n"\
+	"			innerCos = u_fl2InnerCos; outerCos = u_fl2OuterCos; lightRange = u_fl2Range;\n"\
+	"		}\n"\
+	"		if (lightEnabled <= 0) return vec3(0.0);\n"\
+	"		vec3 flDir = normalize(lightDir);\n"\
+	"		vec3 flOrigin = (u_flStyle > 0) ? (lightPos - flDir * 39.0) : lightPos;\n"\
+	"		vec3 L = flOrigin - flP;\n"\
+	"		float d = length(L);\n"\
+	"		L /= max(d, 0.0001);\n"\
+	"		float cone = smoothstep(outerCos, innerCos, dot(-L, flDir));\n"\
+	"		float ndl = 1.0;\n"\
+	"		float atten;\n"\
+	"		if (u_flStyle > 0) {\n"\
+	"			cone = cone * (2.0 - cone);\n"\
+	"			float attenD = d * 2.0;\n"\
+	"			float invD = 1.0 / max(attenD, 1.0);\n"\
+	"			atten = max(0.0, 134217728.0 * invD * invD - 16.0);\n"\
+	"			atten += min(48.0, 32768.0 * invD);\n"\
+	"			atten = clamp(atten / 255.0, 0.0, 1.0);\n"\
+	"			atten *= 1.0 - smoothstep(lightRange * 0.9, lightRange, attenD);\n"\
+	"		} else {\n"\
+	"			vec3 flN = cross(dFdx(flP), dFdy(flP));\n"\
+	"			float nlen = length(flN);\n"\
+	"			vec3 N = (nlen > 1e-9) ? flN / nlen : vec3(0.0, 0.0, -1.0);\n"\
+	"			if (dot(N, flP) > 0.0) N = -N;\n"\
+	"			ndl = 0.15 + 0.85 * max(dot(N, L), 0.0);\n"\
+	"			atten = clamp(1.0 - d / lightRange, 0.0, 1.0);\n"\
+	"		}\n"\
+	"		float shadow = shVisibility(lightIndex, flShadowP, L, d);\n"\
+	"		return flAlbedo * lightColor * (cone * atten * ndl * shadow);\n"\
 	"	}\n"
 
 /* The lit fragment tail: vertex-color modulate, per-pixel flashlight +
@@ -1106,86 +1394,11 @@ int g_PsxFogToBlack = 0;
 #define GPU_LIT_TAIL\
 	"		vec3 flAlbedo = fragColor.rgb;\n"\
 	"		fragColor *= v_color;\n"\
-	/* Two flashlight styles, chosen by the UNIFORM u_flStyle (uniform control flow, so derivative use inside the branch is well-defined). 1 = CLASSIC: PSX-calibrated orientation-independent overlay -- no face normals, func_80057658-derived falloff, eased wide cone, 0.49 base dim. 0 = MODERN: stylized spotlight -- per-fragment Lambert from a dFdx/dFdy-reconstructed face normal, linear falloff, hard 0.15 dark surround. */\
-	"		if (u_flashlightOn > 0) {\n"\
-	"			vec3 flP = v_viewpos;\n"\
-	"			if (flP.z > 0.0) {\n"\
-	"				fragColor.rgb *= (u_flStyle > 0) ? 0.49 : 0.15;\n"\
-	"				vec3 flDir = normalize(u_flDir);\n"\
-	"				vec3 flOrigin = (u_flStyle > 0) ? (u_flLightPos - flDir * 39.0) : u_flLightPos;\n"\
-	"				vec3 L = flOrigin - flP;\n"\
-	"				float d = length(L);\n"\
-	"				L /= max(d, 0.0001);\n"\
-	"				float cone  = smoothstep(u_flOuterCos, u_flInnerCos, dot(-L, flDir));\n"\
-	"				float ndl = 1.0;\n"\
-	"				float atten;\n"\
-	"				if (u_flStyle > 0) {\n"\
-	"					cone = cone * (2.0 - cone);\n"\
-	/* Classic center-beam distance envelope derived from SH1's func_80057658 at full Q12 flashlight strength: its GTE projection reduces to a capped 1/d term plus a thresholded 1/d^2 term, normalized by the room-light cap. */\
-	"					float attenD = d * 2.0;\n"\
-	"					float invD = 1.0 / max(attenD, 1.0);\n"\
-	"					atten = max(0.0, 134217728.0 * invD * invD - 16.0);\n"\
-	"					atten += min(48.0, 32768.0 * invD);\n"\
-	"					atten = clamp(atten / 255.0, 0.0, 1.0);\n"\
-	"					atten *= 1.0 - smoothstep(u_flRange * 0.9, u_flRange, attenD);\n"\
-	"				} else {\n"\
-	/* Modern: GrVertex carries no usable normals, so the face normal is reconstructed from the view-space position gradient -- exact per triangle face, no GTE-side capture needed. The N.L term gives surfaces 3D shape under the beam. */\
-	"					vec3 flN = cross(dFdx(flP), dFdy(flP));\n"\
-	"					float nlen = length(flN);\n"\
-	"					vec3 N = (nlen > 1e-9) ? flN / nlen : vec3(0.0, 0.0, -1.0);\n"\
-	"					if (dot(N, flP) > 0.0) N = -N;\n"\
-	"					ndl = 0.15 + 0.85 * max(dot(N, L), 0.0);\n"\
-	"					atten = clamp(1.0 - d / u_flRange, 0.0, 1.0);\n"\
-	"				}\n"\
-	/* Bilinearly interpolated 3x3 PCF avoids kernel jumps as the projected receiver crosses shadow texels. */\
-	"				float shadow = 1.0;\n"\
-	"				if (u_shadowOn > 0) {\n"\
-	/* Perspective-correct shadow receiver (PR#8): correctness for BOTH styles -- same shadow shapes, just stable under motion. */\
-	"					vec3 flShadowP = v_shadowViewPos.xyz / max(v_shadowViewPos.w, 1e-9);\n"\
-	"					vec3 flPs = flShadowP + L * (u_shadowNormalOffset * d);\n"\
-	"					vec4 lp = u_shadowMatrix * vec4(flPs, 1.0);\n"\
-	"					if (lp.w > 0.0) {\n"\
-	"						vec3 luv = lp.xyz / lp.w * 0.5 + 0.5;\n"\
-	"						if (luv.x > 0.0 && luv.x < 1.0 && luv.y > 0.0 && luv.y < 1.0 && luv.z < 1.0) {\n"\
-	"							vec3 luvDx = dFdx(luv);\n"\
-	"							vec3 luvDy = dFdy(luv);\n"\
-	"							float det = luvDx.x * luvDy.y - luvDx.y * luvDy.x;\n"\
-	"							float dzdu = 0.0;\n"\
-	"							float dzdv = 0.0;\n"\
-	"							if (abs(det) > 1e-9) {\n"\
-	"								dzdu = (luvDx.z * luvDy.y - luvDy.z * luvDx.y) / det;\n"\
-	"								dzdv = (luvDy.z * luvDx.x - luvDx.z * luvDy.x) / det;\n"\
-	"							}\n"\
-	"							float recvLin = (u_shadowFadeDist > 0.0) ? shLinDepth(luv.z) : 0.0;\n"\
-	"							float occ = 0.0;\n"\
-	"							vec2 texelPos = luv.xy / u_shadowTexel - vec2(0.5);\n"\
-	"							vec2 texelBase = floor(texelPos);\n"\
-	"							vec2 texelFrac = fract(texelPos);\n"\
-	"							for (int sy = -1; sy <= 2; sy++) {\n"\
-	"								float wy = (sy == -1) ? (1.0 - texelFrac.y) : ((sy == 2) ? texelFrac.y : 1.0);\n"\
-	"								for (int sx = -1; sx <= 2; sx++) {\n"\
-	"									float wx = (sx == -1) ? (1.0 - texelFrac.x) : ((sx == 2) ? texelFrac.x : 1.0);\n"\
-	"									float weight = wx * wy;\n"\
-	"									vec2 suv = (texelBase + vec2(float(sx), float(sy)) + vec2(0.5)) * u_shadowTexel;\n"\
-	"									float sd = texture2D(u_shadowTex, suv).r;\n"\
-	"									float receiverDepth = luv.z + dzdu * (suv.x - luv.x) + dzdv * (suv.y - luv.y);\n"\
-	"									if (receiverDepth - u_shadowBias > sd) {\n"\
-	"										if (u_shadowFadeDist > 0.0) {\n"\
-	"											float gap = recvLin - shLinDepth(sd);\n"\
-	"											occ += weight * (1.0 - clamp(gap / u_shadowFadeDist, 0.0, 1.0));\n"\
-	"										} else {\n"\
-	"											occ += weight;\n"\
-	"										}\n"\
-	"									}\n"\
-	"								}\n"\
-	"							}\n"\
-	"							shadow = 1.0 - u_shadowStrength * (occ / 9.0);\n"\
-	"						}\n"\
-	"					}\n"\
-	"				}\n"\
-	"				vec3 fl = u_flColor * (cone * atten * ndl * shadow);\n"\
-	"				fragColor.rgb += flAlbedo * fl;\n"\
-	"			}\n"\
+	"		if ((u_flashlightOn > 0 || u_flashlight2On > 0) && v_viewpos.z > 0.0) {\n"\
+	"			if (u_flashlightOn > 0) fragColor.rgb *= (u_flStyle > 0) ? 0.49 : 0.15;\n"\
+	"			vec3 flShadowP = v_shadowViewPos.xyz / max(v_shadowViewPos.w, 1e-9);\n"\
+	"			fragColor.rgb += flEvaluate(0, v_viewpos, flShadowP, flAlbedo);\n"\
+	"			fragColor.rgb += flEvaluate(1, v_viewpos, flShadowP, flAlbedo);\n"\
 	"		}\n"\
 	"		float fogAmt = clamp(v_fogAmount * u_fogStrength, 0.0, 1.0);\n"\
 	"		if (u_fogToBlack > 0)\n"\
@@ -1474,6 +1687,351 @@ ShaderID GR_Shader_Compile(const char* source)
 
 //--------------------------------------------------------------------------------------------
 
+#if USE_OPENGL
+
+#if PSYX_HAS_POSTPROCESS
+static const char* g_postProcessShader =
+	"varying vec2 v_uv;\n"
+	"#ifdef VERTEX\n"
+	"void main() {\n"
+	"	float x = -1.0;\n"
+	"	float y = -1.0;\n"
+	"	if (gl_VertexID == 1) x = 3.0;\n"
+	"	if (gl_VertexID == 2) y = 3.0;\n"
+	"	v_uv = vec2((x + 1.0) * 0.5, (y + 1.0) * 0.5);\n"
+	"	gl_Position = vec4(x, y, 0.0, 1.0);\n"
+	"}\n"
+	"#else\n"
+	"uniform sampler2D s_texture;\n"
+	"uniform int u_postMode;\n"
+	"uniform int u_tonemap;\n"
+	"uniform float u_postIntensity;\n"
+	"uniform float u_tonemapIntensity;\n"
+	"vec3 toneMap(vec3 c) {\n"
+	"	if (u_tonemap == 1) return c / (c + vec3(1.0));\n"
+	"	if (u_tonemap == 2) return clamp((c * (2.51 * c + 0.03)) / (c * (2.43 * c + 0.59) + 0.14), 0.0, 1.0);\n"
+	"	if (u_tonemap == 3) return clamp((c * (6.2 * c + 0.5)) / (c * (6.2 * c + 1.7) + 0.06), 0.0, 1.0);\n"
+	"	return c;\n"
+	"}\n"
+	"float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }\n"
+	"void main() {\n"
+	"	vec4 src = texture2D(s_texture, v_uv);\n"
+	"	vec3 col = src.rgb;\n"
+	"	vec2 p = v_uv * 2.0 - 1.0;\n"
+	"	float vig = smoothstep(1.35, 0.25, length(p));\n"
+	"	vec3 look = col;\n"
+	"	if (u_postMode == 1) {\n"
+	"		float scan = 0.92 + 0.08 * sin(gl_FragCoord.y * 3.14159);\n"
+	"		look = vec3(col.r * 1.04, col.g, col.b * 0.92) * scan * mix(0.82, 1.0, vig);\n"
+	"	} else if (u_postMode == 2) {\n"
+	"		look = col * (0.82 + 0.18 * sin(gl_FragCoord.y * 3.14159));\n"
+	"	} else if (u_postMode == 3) {\n"
+	"		look = col * mix(0.62, 1.0, vig);\n"
+	"	} else if (u_postMode == 4) {\n"
+	"		look = vec3(dot(col, vec3(0.28, 0.48, 0.24))) * vec3(1.08, 0.98, 0.86);\n"
+	"	} else if (u_postMode == 5) {\n"
+	"		look = clamp(col + (hash(gl_FragCoord.xy) - 0.5) * 0.08, 0.0, 1.0);\n"
+	"	} else if (u_postMode == 6) {\n"
+	"		vec3 soft = texture2D(s_texture, v_uv + vec2(1.0 / 640.0, 0.0)).rgb + texture2D(s_texture, v_uv - vec2(1.0 / 640.0, 0.0)).rgb;\n"
+	"		soft += texture2D(s_texture, v_uv + vec2(0.0, 1.0 / 480.0)).rgb + texture2D(s_texture, v_uv - vec2(0.0, 1.0 / 480.0)).rgb;\n"
+	"		look = clamp(col * 1.45 - soft * 0.1125, 0.0, 1.0);\n"
+	"	} else if (u_postMode == 7) {\n"
+	"		look = floor(col * 32.0 + 0.5) / 32.0;\n"
+	"	} else if (u_postMode == 8) {\n"
+	"		look = pow(col, vec3(0.95)) * vec3(1.05, 0.98, 0.88) * mix(0.72, 1.0, vig);\n"
+	"	}\n"
+	"	col = mix(col, look, clamp(u_postIntensity, 0.0, 1.0));\n"
+	"	col = mix(col, toneMap(max(col, vec3(0.0))), clamp(u_tonemapIntensity, 0.0, 1.0));\n"
+	"	fragColor = vec4(clamp(col, 0.0, 1.0), src.a);\n"
+	"}\n"
+	"#endif\n";
+
+void GR_EnsurePostTarget(int width, int height)
+{
+	if (width <= 0 || height <= 0)
+		return;
+
+	if (!g_postFBO)
+		glGenFramebuffers(1, &g_postFBO);
+	if (!g_postTex)
+		glGenTextures(1, &g_postTex);
+
+	if (g_postW != width || g_postH != height)
+	{
+		g_postW = width;
+		g_postH = height;
+		glBindTexture(GL_TEXTURE_2D, g_postTex);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, g_postW, g_postH, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+		glBindTexture(GL_TEXTURE_2D, 0);
+
+		glBindFramebuffer(GL_FRAMEBUFFER, g_postFBO);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_postTex, 0);
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	}
+}
+
+void GR_DrawFullscreenTexture(GLuint texture, int applyPost)
+{
+	GLint prevProgram = 0;
+	GLint prevVAO = 0;
+	GLint prevTexture = 0;
+	GLint prevViewport[4];
+	GLboolean depthWas = glIsEnabled(GL_DEPTH_TEST);
+	GLboolean stencilWas = glIsEnabled(GL_STENCIL_TEST);
+	GLboolean blendWas = glIsEnabled(GL_BLEND);
+	GLboolean scissorWas = glIsEnabled(GL_SCISSOR_TEST);
+
+	if (g_postShader == (ShaderID)-1 || texture == 0)
+		return;
+
+	if (!g_postVAO)
+		glGenVertexArrays(1, &g_postVAO);
+
+	glGetIntegerv(GL_CURRENT_PROGRAM, &prevProgram);
+	glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &prevVAO);
+	glGetIntegerv(GL_TEXTURE_BINDING_2D, &prevTexture);
+	glGetIntegerv(GL_VIEWPORT, prevViewport);
+
+	glDisable(GL_DEPTH_TEST);
+	glDisable(GL_STENCIL_TEST);
+	glDisable(GL_BLEND);
+	glDisable(GL_SCISSOR_TEST);
+	glViewport(0, 0, g_windowWidth, g_windowHeight);
+	glUseProgram(g_postShader);
+	glUniform1i(g_postModeLoc, applyPost ? g_cfg_postProcess : 0);
+	glUniform1i(g_postToneLoc, applyPost ? g_cfg_tonemap : 0);
+	glUniform1f(g_postIntensityLoc, g_cfg_postProcessIntensity);
+	glUniform1f(g_postToneIntensityLoc, g_cfg_tonemapIntensity);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, texture);
+	glBindVertexArray(g_postVAO);
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+
+	glBindVertexArray((GLuint)prevVAO);
+	glBindTexture(GL_TEXTURE_2D, (GLuint)prevTexture);
+	glUseProgram((GLuint)prevProgram);
+	glViewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3]);
+	if (depthWas) glEnable(GL_DEPTH_TEST); else glDisable(GL_DEPTH_TEST);
+	if (stencilWas) glEnable(GL_STENCIL_TEST); else glDisable(GL_STENCIL_TEST);
+	if (blendWas) glEnable(GL_BLEND); else glDisable(GL_BLEND);
+	if (scissorWas) glEnable(GL_SCISSOR_TEST); else glDisable(GL_SCISSOR_TEST);
+}
+#endif
+
+static const char* g_shadowDepthShaderSource =
+	"#ifdef VERTEX\n"
+	"attribute vec3 a_viewpos;\n"
+	"uniform mat4 u_shadowMatrix;\n"
+	"void main() { gl_Position = u_shadowMatrix * vec4(a_viewpos, 1.0); }\n"
+	"#else\n"
+	"void main() { fragColor = vec4(1.0); }\n"
+	"#endif\n";
+
+static void GR_Normalize3(float* v)
+{
+	float len = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+	if (len > 0.00001f)
+	{
+		v[0] /= len;
+		v[1] /= len;
+		v[2] /= len;
+	}
+}
+
+static void GR_Cross3(float* out, const float* a, const float* b)
+{
+	out[0] = a[1] * b[2] - a[2] * b[1];
+	out[1] = a[2] * b[0] - a[0] * b[2];
+	out[2] = a[0] * b[1] - a[1] * b[0];
+}
+
+static float GR_Dot3(const float* a, const float* b)
+{
+	return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+static void GR_BuildShadowMatrix(int lightIndex)
+{
+	const float* lightDir = lightIndex == 0 ? g_PsyX_FlashlightDir : g_PsyX_RemoteFlashlightDir;
+	const float* lightPos = lightIndex == 0 ? g_PsyX_FlashlightShadowPos : g_PsyX_RemoteFlashlightShadowPos;
+	float* lightMatrix = g_shadowLightMatrix[lightIndex];
+	float forward[3] = { lightDir[0], lightDir[1], lightDir[2] };
+	float upSeed[3] = { 0.0f, -1.0f, 0.0f };
+	float right[3];
+	float up[3];
+	float sx;
+	float sy;
+	float sz;
+	float span;
+
+	GR_Normalize3(forward);
+	if (fabsf(GR_Dot3(forward, upSeed)) > 0.95f)
+	{
+		upSeed[0] = 1.0f;
+		upSeed[1] = 0.0f;
+		upSeed[2] = 0.0f;
+	}
+
+	GR_Cross3(right, upSeed, forward);
+	GR_Normalize3(right);
+	GR_Cross3(up, forward, right);
+	GR_Normalize3(up);
+
+	g_shadowZNear[lightIndex] = 20.0f;
+	g_shadowZFar[lightIndex] = g_PsyX_FlashlightRange > 100.0f ? g_PsyX_FlashlightRange : 4000.0f;
+	span = g_shadowZFar[lightIndex] * 0.62f;
+	if (span < 512.0f) span = 512.0f;
+	sx = 1.0f / span;
+	sy = 1.0f / span;
+	sz = 2.0f / (g_shadowZFar[lightIndex] - g_shadowZNear[lightIndex]);
+
+	lightMatrix[0]  = right[0] * sx;
+	lightMatrix[1]  = up[0] * sy;
+	lightMatrix[2]  = forward[0] * sz;
+	lightMatrix[3]  = 0.0f;
+	lightMatrix[4]  = right[1] * sx;
+	lightMatrix[5]  = up[1] * sy;
+	lightMatrix[6]  = forward[1] * sz;
+	lightMatrix[7]  = 0.0f;
+	lightMatrix[8]  = right[2] * sx;
+	lightMatrix[9]  = up[2] * sy;
+	lightMatrix[10] = forward[2] * sz;
+	lightMatrix[11] = 0.0f;
+	lightMatrix[12] = -GR_Dot3(right, lightPos) * sx;
+	lightMatrix[13] = -GR_Dot3(up, lightPos) * sy;
+	lightMatrix[14] = -GR_Dot3(forward, lightPos) * sz -
+	                  (g_shadowZFar[lightIndex] + g_shadowZNear[lightIndex]) /
+	                  (g_shadowZFar[lightIndex] - g_shadowZNear[lightIndex]);
+	lightMatrix[15] = 1.0f;
+}
+
+int GR_FlashlightShadowActive(int lightIndex)
+{
+	int active;
+	if (lightIndex < 0 || lightIndex > 1)
+		return 0;
+	active = lightIndex == 0 ? g_PsyX_FlashlightActive : g_PsyX_RemoteFlashlightActive;
+	return (g_PsyX_UseFlashlightShadows && g_PsyX_UsePerPixelFlashlight &&
+	        active && g_PsyX_ShadowsAllowed &&
+	        !g_PsxPresentLastFrame) ? 1 : 0;
+}
+
+void GR_ShadowPassBegin(int lightIndex)
+{
+	g_shadowPassIndex = -1;
+	if (!GR_FlashlightShadowActive(lightIndex))
+		return;
+
+	if (!g_shadowFBO)
+		glGenFramebuffers(1, &g_shadowFBO);
+	if (!g_shadowDepthTex[lightIndex])
+	{
+		glGenTextures(1, &g_shadowDepthTex[lightIndex]);
+		glBindTexture(GL_TEXTURE_2D, g_shadowDepthTex[lightIndex]);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, PSYX_SHADOW_MAP_SIZE, PSYX_SHADOW_MAP_SIZE, 0, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, NULL);
+		glBindTexture(GL_TEXTURE_2D, 0);
+	}
+	if (g_shadowDepthShader == (ShaderID)-1)
+	{
+		g_shadowDepthShader = GR_Shader_Compile(g_shadowDepthShaderSource);
+		g_shadowDepthMatrixLoc = glGetUniformLocation(g_shadowDepthShader, "u_shadowMatrix");
+	}
+
+	GR_BuildShadowMatrix(lightIndex);
+	g_shadowPassIndex = lightIndex;
+
+	glBindFramebuffer(GL_FRAMEBUFFER, g_shadowFBO);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, g_shadowDepthTex[lightIndex], 0);
+	glDrawBuffer(GL_NONE);
+	glReadBuffer(GL_NONE);
+	glViewport(0, 0, PSYX_SHADOW_MAP_SIZE, PSYX_SHADOW_MAP_SIZE);
+	glClearDepth(1.0);
+	glClear(GL_DEPTH_BUFFER_BIT);
+	glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+	glEnable(GL_DEPTH_TEST);
+	glDepthFunc(GL_LEQUAL);
+	glDisable(GL_BLEND);
+	glDisable(GL_SCISSOR_TEST);
+	glUseProgram(g_shadowDepthShader);
+	if (g_shadowDepthMatrixLoc != -1)
+		glUniformMatrix4fv(g_shadowDepthMatrixLoc, 1, GL_FALSE, g_shadowLightMatrix[lightIndex]);
+}
+
+void GR_ShadowPassDraw(int start_vertex, int num_verts)
+{
+	if (g_shadowPassIndex < 0 || !GR_FlashlightShadowActive(g_shadowPassIndex) ||
+	    g_shadowDepthShader == (ShaderID)-1 || num_verts <= 0)
+		return;
+
+	glDrawArrays(GL_TRIANGLES, start_vertex, num_verts);
+}
+
+void GR_ShadowPassEnd(void)
+{
+	if (g_shadowPassIndex < 0)
+		return;
+
+	glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glViewport(0, 0, g_windowWidth, g_windowHeight);
+	glUseProgram(0);
+	g_PreviousShader = (ShaderID)-1;
+	g_shadowPassIndex = -1;
+}
+
+#endif /* USE_OPENGL */
+
+void GR_InitPostProcess(void)
+{
+#if USE_OPENGL && PSYX_HAS_POSTPROCESS
+	if (g_postShader == (ShaderID)-1)
+	{
+		g_postShader = GR_Shader_Compile(g_postProcessShader);
+		g_postModeLoc = glGetUniformLocation(g_postShader, "u_postMode");
+		g_postToneLoc = glGetUniformLocation(g_postShader, "u_tonemap");
+		g_postIntensityLoc = glGetUniformLocation(g_postShader, "u_postIntensity");
+		g_postToneIntensityLoc = glGetUniformLocation(g_postShader, "u_tonemapIntensity");
+		glUseProgram(g_postShader);
+		glUniform1i(glGetUniformLocation(g_postShader, "s_texture"), 0);
+		glUseProgram(0);
+	}
+#endif
+}
+
+void GR_PostProcess(void)
+{
+#if USE_OPENGL && PSYX_HAS_POSTPROCESS
+	if (g_cfg_postProcess <= 0 && g_cfg_tonemap <= 0)
+		return;
+	if (g_windowWidth <= 0 || g_windowHeight <= 0)
+		return;
+
+	GR_EnsurePostTarget(g_windowWidth, g_windowHeight);
+	if (!g_postFBO || !g_postTex)
+		return;
+
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_postFBO);
+	glBlitFramebuffer(0, 0, g_windowWidth, g_windowHeight,
+	                  0, 0, g_postW, g_postH,
+	                  GL_COLOR_BUFFER_BIT, GL_NEAREST);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+
+	GR_DrawFullscreenTexture(g_postTex, 1);
+#endif
+}
+
+//--------------------------------------------------------------------------------------------
+
 void GR_GenerateCommonTextures()
 {
 	unsigned int pixelData = 0xFFFFFFFF;
@@ -1544,6 +2102,21 @@ void GR_CompilePSXShader(GTEShader* sh, const char* source)
 	sh->shadowStrengthLoc = glGetUniformLocation(sh->shader, "u_shadowStrength");
 	sh->shadowClipLoc = glGetUniformLocation(sh->shader, "u_shadowClip");
 	sh->shadowFadeDistLoc = glGetUniformLocation(sh->shader, "u_shadowFadeDist");
+	sh->flashlight2OnLoc = glGetUniformLocation(sh->shader, "u_flashlight2On");
+	sh->fl2LightPosLoc = glGetUniformLocation(sh->shader, "u_fl2LightPos");
+	sh->fl2DirLoc = glGetUniformLocation(sh->shader, "u_fl2Dir");
+	sh->fl2ColorLoc = glGetUniformLocation(sh->shader, "u_fl2Color");
+	sh->fl2InnerCosLoc = glGetUniformLocation(sh->shader, "u_fl2InnerCos");
+	sh->fl2OuterCosLoc = glGetUniformLocation(sh->shader, "u_fl2OuterCos");
+	sh->fl2RangeLoc = glGetUniformLocation(sh->shader, "u_fl2Range");
+	sh->shadow2OnLoc = glGetUniformLocation(sh->shader, "u_shadow2On");
+	sh->shadow2MatrixLoc = glGetUniformLocation(sh->shader, "u_shadow2Matrix");
+	sh->shadow2BiasLoc = glGetUniformLocation(sh->shader, "u_shadow2Bias");
+	sh->shadow2TexelLoc = glGetUniformLocation(sh->shader, "u_shadow2Texel");
+	sh->shadow2NormalOffsetLoc = glGetUniformLocation(sh->shader, "u_shadow2NormalOffset");
+	sh->shadow2StrengthLoc = glGetUniformLocation(sh->shader, "u_shadow2Strength");
+	sh->shadow2ClipLoc = glGetUniformLocation(sh->shader, "u_shadow2Clip");
+	sh->shadow2FadeDistLoc = glGetUniformLocation(sh->shader, "u_shadow2FadeDist");
 
 	/* Shadow map lives on texture unit 1 (scene textures use unit 0). Bind the
 	 * sampler once here; the depth texture is bound to GL_TEXTURE1 each frame. */
@@ -1551,12 +2124,18 @@ void GR_CompilePSXShader(GTEShader* sh, const char* source)
 		GLint prevProg = 0;
 		glGetIntegerv(GL_CURRENT_PROGRAM, &prevProg);
 		GLint sloc = glGetUniformLocation(sh->shader, "u_shadowTex");
+		GLint s2loc = glGetUniformLocation(sh->shader, "u_shadow2Tex");
 		if (sloc != -1)
 		{
 			glUseProgram(sh->shader);
 			glUniform1i(sloc, 1);
-			glUseProgram(prevProg);
 		}
+		if (s2loc != -1)
+		{
+			glUseProgram(sh->shader);
+			glUniform1i(s2loc, 2);
+		}
+		glUseProgram(prevProg);
 	}
 #endif
 }
@@ -1877,6 +2456,21 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_shadowStrengthLoc = g_gte_shader_4.shadowStrengthLoc;
 		u_shadowClipLoc = g_gte_shader_4.shadowClipLoc;
 		u_shadowFadeDistLoc = g_gte_shader_4.shadowFadeDistLoc;
+		u_flashlight2OnLoc = g_gte_shader_4.flashlight2OnLoc;
+		u_fl2LightPosLoc = g_gte_shader_4.fl2LightPosLoc;
+		u_fl2DirLoc = g_gte_shader_4.fl2DirLoc;
+		u_fl2ColorLoc = g_gte_shader_4.fl2ColorLoc;
+		u_fl2InnerCosLoc = g_gte_shader_4.fl2InnerCosLoc;
+		u_fl2OuterCosLoc = g_gte_shader_4.fl2OuterCosLoc;
+		u_fl2RangeLoc = g_gte_shader_4.fl2RangeLoc;
+		u_shadow2OnLoc = g_gte_shader_4.shadow2OnLoc;
+		u_shadow2MatrixLoc = g_gte_shader_4.shadow2MatrixLoc;
+		u_shadow2BiasLoc = g_gte_shader_4.shadow2BiasLoc;
+		u_shadow2TexelLoc = g_gte_shader_4.shadow2TexelLoc;
+		u_shadow2NormalOffsetLoc = g_gte_shader_4.shadow2NormalOffsetLoc;
+		u_shadow2StrengthLoc = g_gte_shader_4.shadow2StrengthLoc;
+		u_shadow2ClipLoc = g_gte_shader_4.shadow2ClipLoc;
+		u_shadow2FadeDistLoc = g_gte_shader_4.shadow2FadeDistLoc;
 		break;
 	case TF_8_BIT:
 		GR_SetShader(g_gte_shader_8.shader);
@@ -1908,6 +2502,21 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_shadowStrengthLoc = g_gte_shader_8.shadowStrengthLoc;
 		u_shadowClipLoc = g_gte_shader_8.shadowClipLoc;
 		u_shadowFadeDistLoc = g_gte_shader_8.shadowFadeDistLoc;
+		u_flashlight2OnLoc = g_gte_shader_8.flashlight2OnLoc;
+		u_fl2LightPosLoc = g_gte_shader_8.fl2LightPosLoc;
+		u_fl2DirLoc = g_gte_shader_8.fl2DirLoc;
+		u_fl2ColorLoc = g_gte_shader_8.fl2ColorLoc;
+		u_fl2InnerCosLoc = g_gte_shader_8.fl2InnerCosLoc;
+		u_fl2OuterCosLoc = g_gte_shader_8.fl2OuterCosLoc;
+		u_fl2RangeLoc = g_gte_shader_8.fl2RangeLoc;
+		u_shadow2OnLoc = g_gte_shader_8.shadow2OnLoc;
+		u_shadow2MatrixLoc = g_gte_shader_8.shadow2MatrixLoc;
+		u_shadow2BiasLoc = g_gte_shader_8.shadow2BiasLoc;
+		u_shadow2TexelLoc = g_gte_shader_8.shadow2TexelLoc;
+		u_shadow2NormalOffsetLoc = g_gte_shader_8.shadow2NormalOffsetLoc;
+		u_shadow2StrengthLoc = g_gte_shader_8.shadow2StrengthLoc;
+		u_shadow2ClipLoc = g_gte_shader_8.shadow2ClipLoc;
+		u_shadow2FadeDistLoc = g_gte_shader_8.shadow2FadeDistLoc;
 		break;
 	case TF_16_BIT:
 		GR_SetShader(g_gte_shader_16.shader);
@@ -1939,6 +2548,21 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_shadowStrengthLoc = g_gte_shader_16.shadowStrengthLoc;
 		u_shadowClipLoc = g_gte_shader_16.shadowClipLoc;
 		u_shadowFadeDistLoc = g_gte_shader_16.shadowFadeDistLoc;
+		u_flashlight2OnLoc = g_gte_shader_16.flashlight2OnLoc;
+		u_fl2LightPosLoc = g_gte_shader_16.fl2LightPosLoc;
+		u_fl2DirLoc = g_gte_shader_16.fl2DirLoc;
+		u_fl2ColorLoc = g_gte_shader_16.fl2ColorLoc;
+		u_fl2InnerCosLoc = g_gte_shader_16.fl2InnerCosLoc;
+		u_fl2OuterCosLoc = g_gte_shader_16.fl2OuterCosLoc;
+		u_fl2RangeLoc = g_gte_shader_16.fl2RangeLoc;
+		u_shadow2OnLoc = g_gte_shader_16.shadow2OnLoc;
+		u_shadow2MatrixLoc = g_gte_shader_16.shadow2MatrixLoc;
+		u_shadow2BiasLoc = g_gte_shader_16.shadow2BiasLoc;
+		u_shadow2TexelLoc = g_gte_shader_16.shadow2TexelLoc;
+		u_shadow2NormalOffsetLoc = g_gte_shader_16.shadow2NormalOffsetLoc;
+		u_shadow2StrengthLoc = g_gte_shader_16.shadow2StrengthLoc;
+		u_shadow2ClipLoc = g_gte_shader_16.shadow2ClipLoc;
+		u_shadow2FadeDistLoc = g_gte_shader_16.shadow2FadeDistLoc;
 		break;
 	case TF_32_BIT_RGBA:
 		GR_SetShader(g_gte_shader_32_rgba.shader);
@@ -1970,6 +2594,21 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_shadowStrengthLoc = g_gte_shader_32_rgba.shadowStrengthLoc;
 		u_shadowClipLoc = g_gte_shader_32_rgba.shadowClipLoc;
 		u_shadowFadeDistLoc = g_gte_shader_32_rgba.shadowFadeDistLoc;
+		u_flashlight2OnLoc = g_gte_shader_32_rgba.flashlight2OnLoc;
+		u_fl2LightPosLoc = g_gte_shader_32_rgba.fl2LightPosLoc;
+		u_fl2DirLoc = g_gte_shader_32_rgba.fl2DirLoc;
+		u_fl2ColorLoc = g_gte_shader_32_rgba.fl2ColorLoc;
+		u_fl2InnerCosLoc = g_gte_shader_32_rgba.fl2InnerCosLoc;
+		u_fl2OuterCosLoc = g_gte_shader_32_rgba.fl2OuterCosLoc;
+		u_fl2RangeLoc = g_gte_shader_32_rgba.fl2RangeLoc;
+		u_shadow2OnLoc = g_gte_shader_32_rgba.shadow2OnLoc;
+		u_shadow2MatrixLoc = g_gte_shader_32_rgba.shadow2MatrixLoc;
+		u_shadow2BiasLoc = g_gte_shader_32_rgba.shadow2BiasLoc;
+		u_shadow2TexelLoc = g_gte_shader_32_rgba.shadow2TexelLoc;
+		u_shadow2NormalOffsetLoc = g_gte_shader_32_rgba.shadow2NormalOffsetLoc;
+		u_shadow2StrengthLoc = g_gte_shader_32_rgba.shadow2StrengthLoc;
+		u_shadow2ClipLoc = g_gte_shader_32_rgba.shadow2ClipLoc;
+		u_shadow2FadeDistLoc = g_gte_shader_32_rgba.shadow2FadeDistLoc;
 		break;
 	}
 
@@ -2038,18 +2677,48 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 	if (u_flRangeLoc != -1)
 		glUniform1f(u_flRangeLoc, g_PsyX_FlashlightRange);
 
+	if (u_flashlight2OnLoc != -1)
+		glUniform1i(u_flashlight2OnLoc,
+		            (g_PsyX_UsePerPixelFlashlight && g_PsyX_RemoteFlashlightActive) ? 1 : 0);
+	if (u_fl2LightPosLoc != -1)
+		glUniform3fv(u_fl2LightPosLoc, 1, g_PsyX_RemoteFlashlightPos);
+	if (u_fl2DirLoc != -1)
+		glUniform3fv(u_fl2DirLoc, 1, g_PsyX_RemoteFlashlightDir);
+	if (u_fl2ColorLoc != -1)
+	{
+		float remoteColor[3];
+		float remoteIntensity = g_PsyX_FlashlightIntensity * g_PsyX_RemoteFlashlightIntensityScale;
+		remoteColor[0] = g_PsyX_RemoteFlashlightColor[0] * remoteIntensity;
+		remoteColor[1] = g_PsyX_RemoteFlashlightColor[1] * remoteIntensity;
+		remoteColor[2] = g_PsyX_RemoteFlashlightColor[2] * remoteIntensity;
+		glUniform3fv(u_fl2ColorLoc, 1, remoteColor);
+	}
+	{
+		float baseOuterCos = g_PsyX_FlashlightStyle ? g_PsyX_FlashlightOuterCos : 0.82f;
+		float remoteInner = 1.0f - g_PsyX_FlashlightSize * (1.0f - g_PsyX_FlashlightInnerCos);
+		float remoteOuter = 1.0f - g_PsyX_FlashlightSize * (1.0f - baseOuterCos);
+		if (remoteInner < 0.05f) remoteInner = 0.05f;
+		if (remoteOuter < 0.05f) remoteOuter = 0.05f;
+		if (u_fl2InnerCosLoc != -1)
+			glUniform1f(u_fl2InnerCosLoc, remoteInner);
+		if (u_fl2OuterCosLoc != -1)
+			glUniform1f(u_fl2OuterCosLoc, remoteOuter);
+	}
+	if (u_fl2RangeLoc != -1)
+		glUniform1f(u_fl2RangeLoc, g_PsyX_FlashlightRange);
+
 	/* Flashlight shadow map: same gate as the depth pre-pass in DrawAllSplits, so the
 	 * shader only samples the shadow texture on frames one was actually rendered. */
 	{
 		int shadowOn = (g_PsyX_UseFlashlightShadows && g_PsyX_UsePerPixelFlashlight &&
-		                g_PsyX_FlashlightActive && g_shadowDepthTex != 0 &&
+		                g_PsyX_FlashlightActive && g_shadowDepthTex[0] != 0 &&
 		                g_PsyX_ShadowsAllowed && !g_PsxPresentLastFrame) ? 1 : 0;
 		if (u_shadowOnLoc != -1)
 			glUniform1i(u_shadowOnLoc, shadowOn);
 		if (shadowOn)
 		{
 			if (u_shadowMatrixLoc != -1)
-				glUniformMatrix4fv(u_shadowMatrixLoc, 1, GL_FALSE, g_shadowLightMatrix);
+				glUniformMatrix4fv(u_shadowMatrixLoc, 1, GL_FALSE, g_shadowLightMatrix[0]);
 			if (u_shadowBiasLoc != -1)
 				glUniform1f(u_shadowBiasLoc, g_PsyX_FlashlightShadowBias);
 			if (u_shadowNormalOffsetLoc != -1)
@@ -2057,13 +2726,41 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 			if (u_shadowStrengthLoc != -1)
 				glUniform1f(u_shadowStrengthLoc, g_PsyX_FlashlightShadowStrength);
 			if (u_shadowClipLoc != -1)
-				glUniform2f(u_shadowClipLoc, g_shadowZNear, g_shadowZFar);
+				glUniform2f(u_shadowClipLoc, g_shadowZNear[0], g_shadowZFar[0]);
 			if (u_shadowFadeDistLoc != -1)
 				glUniform1f(u_shadowFadeDistLoc, g_PsyX_FlashlightShadowFadeDist);
 			if (u_shadowTexelLoc != -1)
 				glUniform2f(u_shadowTexelLoc, 1.0f / (float)PSYX_SHADOW_MAP_SIZE, 1.0f / (float)PSYX_SHADOW_MAP_SIZE);
 			glActiveTexture(GL_TEXTURE1);
-			glBindTexture(GL_TEXTURE_2D, g_shadowDepthTex);
+			glBindTexture(GL_TEXTURE_2D, g_shadowDepthTex[0]);
+			glActiveTexture(GL_TEXTURE0);
+		}
+	}
+
+	{
+		int shadowOn = (g_PsyX_UseFlashlightShadows && g_PsyX_UsePerPixelFlashlight &&
+		                g_PsyX_RemoteFlashlightActive && g_shadowDepthTex[1] != 0 &&
+		                g_PsyX_ShadowsAllowed && !g_PsxPresentLastFrame) ? 1 : 0;
+		if (u_shadow2OnLoc != -1)
+			glUniform1i(u_shadow2OnLoc, shadowOn);
+		if (shadowOn)
+		{
+			if (u_shadow2MatrixLoc != -1)
+				glUniformMatrix4fv(u_shadow2MatrixLoc, 1, GL_FALSE, g_shadowLightMatrix[1]);
+			if (u_shadow2BiasLoc != -1)
+				glUniform1f(u_shadow2BiasLoc, g_PsyX_FlashlightShadowBias);
+			if (u_shadow2NormalOffsetLoc != -1)
+				glUniform1f(u_shadow2NormalOffsetLoc, g_PsyX_FlashlightShadowNormalOffset);
+			if (u_shadow2StrengthLoc != -1)
+				glUniform1f(u_shadow2StrengthLoc, g_PsyX_FlashlightShadowStrength);
+			if (u_shadow2ClipLoc != -1)
+				glUniform2f(u_shadow2ClipLoc, g_shadowZNear[1], g_shadowZFar[1]);
+			if (u_shadow2FadeDistLoc != -1)
+				glUniform1f(u_shadow2FadeDistLoc, g_PsyX_FlashlightShadowFadeDist);
+			if (u_shadow2TexelLoc != -1)
+				glUniform2f(u_shadow2TexelLoc, 1.0f / (float)PSYX_SHADOW_MAP_SIZE, 1.0f / (float)PSYX_SHADOW_MAP_SIZE);
+			glActiveTexture(GL_TEXTURE2);
+			glBindTexture(GL_TEXTURE_2D, g_shadowDepthTex[1]);
 			glActiveTexture(GL_TEXTURE0);
 		}
 	}
@@ -2362,7 +3059,7 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 			const float psxW = (float)activeDispEnv.disp.w;  // 320
 			float psxH = (float)activeDispEnv.disp.h;   // 224 — aspect/horizontal only
 			float orthoTop = 0.0f, orthoBot = psxH;
-			if (g_PcHorPlusEnabled) {
+			if (g_PcHorPlusEnabled && !g_PsxUIOrthoPass) {
 				/* 3D gameplay world renders ~14.7% too much vertical world (measured: vertical
 				 * scale 0.872 vs DuckStation at a fixed 4:3 spot, horizontal 1.0, top-aligned
 				 * with the extra at the BOTTOM = near foreground). Crop the world ortho to
@@ -2564,491 +3261,20 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 #endif
 }
 
-/* ============================================================================
- * PC port: full-screen post-process pass + MSAA-safe fullscreen blit helper.
- *
- * One tiny shader program draws a single full-screen triangle (from gl_VertexID,
- * no vertex buffer) sampling a source texture, applying the look selected by
- * g_cfg_postProcess. The same helper is reused to "present" the freeze-frame
- * when MSAA is on (a single-sample -> multisample glBlitFramebuffer is illegal,
- * but a shader draw into the multisample default FBO is fine).
- * ========================================================================== */
-#if defined(RENDERER_OGL) || (OGLES_VERSION == 3)
-#define PSYX_HAS_POSTPROCESS 1
-#else
-#define PSYX_HAS_POSTPROCESS 0
-#endif
-
-#if PSYX_HAS_POSTPROCESS
-
-static ShaderID g_postShader = (ShaderID)-1;
-static GLint    g_postLoc_mode = -1;
-static GLint    g_postLoc_texSize = -1;
-static GLint    g_postLoc_time = -1;
-static GLint    g_postLoc_tonemap = -1;
-static GLint    g_postLoc_postInt = -1;
-static GLint    g_postLoc_tmInt = -1;
-static GLuint   g_postVAO = 0;
-static GLuint   g_postFBO = 0;
-static TextureID g_postTex = (TextureID)-1;
-static int      g_postW = 0;
-static int      g_postH = 0;
-static unsigned g_postFrame = 0;
-
-static const char* s_postShaderSrc =
-	"varying vec2 v_uv;\n"
-	"#ifdef VERTEX\n"
-	"void main() {\n"
-	"	vec2 p = vec2(float((gl_VertexID & 1) << 2) - 1.0, float((gl_VertexID & 2) << 1) - 1.0);\n"
-	"	v_uv = (p + 1.0) * 0.5;\n"
-	"	gl_Position = vec4(p, 0.0, 1.0);\n"
-	"}\n"
-	"#else\n"
-	"uniform sampler2D s_texture;\n"
-	"uniform int   u_postMode;\n"
-	"uniform vec2  u_texSize;\n"  /* (1/width, 1/height) of the source */
-	"uniform float u_time;\n"
-	"uniform int   u_tonemap;\n"
-	"uniform float u_postIntensity;\n"
-	"uniform float u_tmIntensity;\n"
-	"float hash(vec2 p) {\n"
-	"	p = fract(p * vec2(123.34, 456.21));\n"
-	"	p += dot(p, p + 45.32);\n"
-	"	return fract(p.x * p.y);\n"
-	"}\n"
-	"vec3 colorGrade(vec3 c) {\n"
-	"	c = (c - 0.5) * 1.12 + 0.5;\n"                       /* contrast */
-	"	float l = dot(c, vec3(0.299, 0.587, 0.114));\n"
-	"	c = mix(vec3(l), c, 1.15);\n"                        /* saturation */
-	"	c *= vec3(1.06, 1.0, 0.94);\n"                       /* warm tint */
-	"	return c;\n"
-	"}\n"
-	"vec2 curve(vec2 uv) {\n"
-	"	uv = uv * 2.0 - 1.0;\n"
-	"	vec2 o = abs(uv.yx) / vec2(6.0, 5.0);\n"
-	"	uv += uv * o * o;\n"
-	"	return uv * 0.5 + 0.5;\n"
-	"}\n"
-	"vec3 tonemap(vec3 c) {\n"
-	"	if (u_tonemap == 1) { return c / (c + vec3(1.0)); }\n"                          /* Reinhard */
-	"	if (u_tonemap == 2) {\n"                                                          /* ACES (Narkowicz) */
-	"		c *= 0.6;\n"
-	"		return clamp((c*(2.51*c+0.03))/(c*(2.43*c+0.59)+0.14), 0.0, 1.0);\n"
-	"	}\n"
-	"	if (u_tonemap == 3) {\n"                                                          /* Filmic (Hejl/Burgess) */
-	"		vec3 x = max(vec3(0.0), c - 0.004);\n"
-	"		return (x*(6.2*x+0.5))/(x*(6.2*x+1.7)+0.06);\n"
-	"	}\n"
-	"	return c;\n"
-	"}\n"
-	"void main() {\n"
-	"	vec2 uv = v_uv;\n"
-	"	vec3 col;\n"
-	"	vec3 origCol = texture2D(s_texture, v_uv).rgb;\n"
-	"	if (u_postMode == 1) {\n"                            /* CRT */
-	"		uv = curve(uv);\n"
-	"		if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { fragColor = vec4(0.0, 0.0, 0.0, 1.0); return; }\n"
-	"		col = texture2D(s_texture, uv).rgb;\n"
-	"		col *= 0.75 + 0.25 * abs(sin(uv.y * 240.0 * 3.14159));\n"
-	"		int m = int(mod(gl_FragCoord.x, 3.0));\n"
-	"		vec3 mask = m == 0 ? vec3(1.0, 0.72, 0.72) : (m == 1 ? vec3(0.72, 1.0, 0.72) : vec3(0.72, 0.72, 1.0));\n"
-	"		col *= mask * 1.25;\n"
-	"		vec2 d = uv - 0.5; col *= clamp(1.0 - dot(d, d) * 1.1, 0.0, 1.0);\n"
-	"	} else if (u_postMode == 2) {\n"                     /* Scanlines */
-	"		col = texture2D(s_texture, uv).rgb;\n"
-	"		col *= 0.7 + 0.3 * abs(sin(uv.y * 240.0 * 3.14159));\n"
-	"	} else if (u_postMode == 3) {\n"                     /* Vignette */
-	"		col = texture2D(s_texture, uv).rgb;\n"
-	"		vec2 d = uv - 0.5; col *= clamp(1.0 - dot(d, d) * 1.3, 0.0, 1.0);\n"
-	"	} else if (u_postMode == 4) {\n"                     /* Color grade */
-	"		col = colorGrade(texture2D(s_texture, uv).rgb);\n"
-	"	} else if (u_postMode == 5) {\n"                     /* Film grain */
-	"		col = texture2D(s_texture, uv).rgb;\n"
-	"		float n = hash(floor(uv / u_texSize) + u_time);\n"
-	"		col += (n - 0.5) * 0.10;\n"
-	"	} else if (u_postMode == 6) {\n"                     /* Sharpen */
-	"		vec3 c = texture2D(s_texture, uv).rgb;\n"
-	"		vec3 b = (texture2D(s_texture, uv + vec2(u_texSize.x, 0.0)).rgb\n"
-	"		        + texture2D(s_texture, uv - vec2(u_texSize.x, 0.0)).rgb\n"
-	"		        + texture2D(s_texture, uv + vec2(0.0, u_texSize.y)).rgb\n"
-	"		        + texture2D(s_texture, uv - vec2(0.0, u_texSize.y)).rgb) * 0.25;\n"
-	"		col = c + (c - b) * 0.85;\n"
-	"	} else if (u_postMode == 7) {\n"                     /* PSX retro: downsample + dither + 5-bit */
-	"		vec2 grid = vec2(320.0, 240.0);\n"
-	"		vec2 quv = (floor(uv * grid) + 0.5) / grid;\n"
-	"		col = texture2D(s_texture, quv).rgb;\n"
-	"		mat4 dith = mat4(-4.0, 0.0, -3.0, 1.0, 2.0, -2.0, 3.0, -1.0, -3.0, 1.0, -4.0, 0.0, 3.0, -1.0, 2.0, -2.0) / 255.0;\n"
-	"		ivec2 dc = ivec2(mod(gl_FragCoord.xy, 4.0));\n"
-	"		col += vec3(dith[dc.x][dc.y]);\n"
-	"		col = floor(col * 32.0 + 0.5) / 32.0;\n"
-	"	} else if (u_postMode == 8) {\n"                     /* Cinematic: grade + vignette + grain */
-	"		col = colorGrade(texture2D(s_texture, uv).rgb);\n"
-	"		vec2 d = uv - 0.5; col *= clamp(1.0 - dot(d, d) * 0.9, 0.0, 1.0);\n"
-	"		float n = hash(floor(uv / u_texSize) + u_time);\n"
-	"		col += (n - 0.5) * 0.045;\n"
-	"	} else {\n"                                          /* passthrough */
-	"		col = texture2D(s_texture, uv).rgb;\n"
-	"	}\n"
-	"	col = mix(origCol, col, u_postIntensity);\n"
-	"	col = mix(col, tonemap(col), u_tmIntensity);\n"
-	"	fragColor = vec4(clamp(col, 0.0, 1.0), 1.0);\n"
-	"}\n"
-	"#endif\n";
-
-void GR_InitPostProcess(void)
+void GR_ResetOffscreenState(void)
 {
-	if (g_postShader != (ShaderID)-1)
-		return;
-
-	g_postShader = GR_Shader_Compile(s_postShaderSrc);
-	g_postLoc_mode    = glGetUniformLocation(g_postShader, "u_postMode");
-	g_postLoc_texSize = glGetUniformLocation(g_postShader, "u_texSize");
-	g_postLoc_time    = glGetUniformLocation(g_postShader, "u_time");
-	g_postLoc_tonemap = glGetUniformLocation(g_postShader, "u_tonemap");
-	g_postLoc_postInt = glGetUniformLocation(g_postShader, "u_postIntensity");
-	g_postLoc_tmInt   = glGetUniformLocation(g_postShader, "u_tmIntensity");
-
-	glGenVertexArrays(1, &g_postVAO);
-}
-
-static void GR_EnsurePostTarget(int w, int h)
-{
-	if (g_postTex != (TextureID)-1 && g_postW == w && g_postH == h)
-		return;
-
-	if (g_postTex == (TextureID)-1)
-	{
-		glGenTextures(1, &g_postTex);
-		glGenFramebuffers(1, &g_postFBO);
-	}
-
-	g_postW = w;
-	g_postH = h;
-
-	glBindTexture(GL_TEXTURE_2D, g_postTex);
-	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-	glBindTexture(GL_TEXTURE_2D, 0);
-
-	glBindFramebuffer(GL_FRAMEBUFFER, g_postFBO);
-	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_postTex, 0);
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
-}
-
-/* Draw a full-screen triangle sampling `tex` into the currently bound default
- * framebuffer, applying post mode `mode` (0 = straight copy). Disables depth /
- * blend / scissor / stencil for the draw, then invalidates the renderer's
- * cached GL state so the next frame's prims re-establish it. */
-static void GR_DrawFullscreenTexture(TextureID tex, int mode)
-{
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
-	glViewport(0, 0, g_windowWidth, g_windowHeight);
-
-	glDisable(GL_DEPTH_TEST);
-	glDisable(GL_BLEND);
-	glDisable(GL_SCISSOR_TEST);
-	glDisable(GL_STENCIL_TEST);
-
-	glUseProgram(g_postShader);
-	if (g_postLoc_mode != -1)
-		glUniform1i(g_postLoc_mode, mode);
-	if (g_postLoc_texSize != -1)
-		glUniform2f(g_postLoc_texSize,
-		            g_windowWidth  > 0 ? 1.0f / (float)g_windowWidth  : 0.0f,
-		            g_windowHeight > 0 ? 1.0f / (float)g_windowHeight : 0.0f);
-	if (g_postLoc_time != -1)
-		glUniform1f(g_postLoc_time, (float)(g_postFrame & 1023));
-	if (g_postLoc_tonemap != -1)
-		glUniform1i(g_postLoc_tonemap, g_cfg_tonemap);
-	if (g_postLoc_postInt != -1)
-		glUniform1f(g_postLoc_postInt, g_cfg_postProcessIntensity);
-	if (g_postLoc_tmInt != -1)
-		glUniform1f(g_postLoc_tmInt, g_cfg_tonemapIntensity);
-
-	glBindTexture(GL_TEXTURE_2D, tex);
-	glBindVertexArray(g_postVAO);
-	glDrawArrays(GL_TRIANGLES, 0, 3);
-	glBindVertexArray(0);
-
-	glEnable(GL_STENCIL_TEST);
-
-	/* The actual GL state now matches: blend off, depth off, scissor off.
-	 * Sync the trackers to that so the next set-call doesn't skip a needed
-	 * change; force the shader/texture trackers to rebind. */
-	g_PreviousShader      = (ShaderID)-1;
-	g_lastBoundTexture    = (TextureID)-1;
-	g_PreviousBlendMode   = BM_NONE;
-	g_PreviousDepthMode   = 0;
-	g_PreviousScissorState = 0;
-}
-
-/* PC port: post-process the composed backbuffer in place. Resolves the (possibly
- * multisample) default framebuffer into a single-sample texture, then redraws it
- * full-screen through the selected look. No-op when g_cfg_postProcess <= 0. */
-void GR_PostProcess(void)
-{
-	if (g_cfg_postProcess <= 0 && g_cfg_tonemap <= 0)
-		return;
-	if (g_postShader == (ShaderID)-1)
-		GR_InitPostProcess();
-
-	GR_EnsurePostTarget(g_windowWidth, g_windowHeight);
-
-	/* Resolve/copy backbuffer -> single-sample source texture (same size, so
-	 * this is a legal multisample resolve when MSAA is on). */
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
-	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_postFBO);
-	glBlitFramebuffer(0, 0, g_windowWidth, g_windowHeight, 0, 0, g_postW, g_postH, GL_COLOR_BUFFER_BIT, GL_NEAREST);
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
-	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
-
-	g_postFrame++;
-	GR_DrawFullscreenTexture(g_postTex, g_cfg_postProcess);
-}
-
-#else  /* !PSYX_HAS_POSTPROCESS */
-void GR_InitPostProcess(void) {}
-void GR_PostProcess(void) {}
-#endif
-
-/* ------------------------------------------------------------------------
- * Flashlight shadow mapping (see g_PsyX_UseFlashlightShadows).
- *
- * Everything is done in the engine's CAMERA VIEW space: GrVertex carries
- * a_viewpos (view space) and the flashlight pos/dir are already pushed in
- * view space, so the light matrix is built purely from those with no
- * world-space / camera-inverse step. Each frame the opaque geometry is
- * rendered depth-only from the light POV into g_shadowDepthTex; the cone
- * fragment shader samples it. Feature is a no-op (byte-identical output)
- * when the master flag is off.
- * ---------------------------------------------------------------------- */
 #if USE_OPENGL
-
-static const char* s_shadowDepthShaderSrc =
-	"#ifdef VERTEX\n"
-	"attribute vec3 a_viewpos;\n"
-	"attribute vec3 a_normal;\n"
-	"uniform mat4 u_shadowMatrix;\n"
-	"void main() {\n"
-	/* a_normal.y marks a validated view-space entry; a_normal.x suppresses casting. */
-	"	if (a_normal.y < 0.5 || a_viewpos.z <= 0.0 || a_normal.x > 0.5) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }\n"
-	"	gl_Position = u_shadowMatrix * vec4(a_viewpos, 1.0);\n"
-	"}\n"
-	"#else\n"
-	"void main() { }\n"
-	"#endif\n";
-
-static void sh_normalize3(float* v)
-{
-	float l = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-	if (l > 1e-8f) { v[0] /= l; v[1] /= l; v[2] /= l; }
-}
-
-static float sh_dot3(const float* a, const float* b)
-{
-	return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-}
-
-static void sh_cross(const float* a, const float* b, float* r)
-{
-	r[0] = a[1] * b[2] - a[2] * b[1];
-	r[1] = a[2] * b[0] - a[0] * b[2];
-	r[2] = a[0] * b[1] - a[1] * b[0];
-}
-
-/* Column-major (GL) perspective + look-at + multiply. */
-static void sh_perspective(float fovy, float aspect, float zn, float zf, float* m)
-{
-	float f = 1.0f / tanf(fovy * 0.5f);
-	for (int i = 0; i < 16; i++) m[i] = 0.0f;
-	m[0]  = f / aspect;
-	m[5]  = f;
-	m[10] = (zf + zn) / (zn - zf);
-	m[11] = -1.0f;
-	m[14] = (2.0f * zf * zn) / (zn - zf);
-}
-
-static void sh_lookat(const float* eye, const float* center, const float* up, float* m)
-{
-	float f[3] = { center[0] - eye[0], center[1] - eye[1], center[2] - eye[2] };
-	sh_normalize3(f);
-	float s[3]; sh_cross(f, up, s); sh_normalize3(s);
-	float u[3]; sh_cross(s, f, u);
-	m[0] = s[0];  m[4] = s[1];  m[8]  = s[2];  m[12] = -sh_dot3(s, eye);
-	m[1] = u[0];  m[5] = u[1];  m[9]  = u[2];  m[13] = -sh_dot3(u, eye);
-	m[2] = -f[0]; m[6] = -f[1]; m[10] = -f[2]; m[14] = sh_dot3(f, eye);
-	m[3] = 0.0f;  m[7] = 0.0f;  m[11] = 0.0f;  m[15] = 1.0f;
-}
-
-static void sh_mul(const float* a, const float* b, float* r)  /* r = a * b */
-{
-	for (int c = 0; c < 4; c++)
-		for (int row = 0; row < 4; row++)
-			r[c * 4 + row] = a[0 * 4 + row] * b[c * 4 + 0] +
-			                 a[1 * 4 + row] * b[c * 4 + 1] +
-			                 a[2 * 4 + row] * b[c * 4 + 2] +
-			                 a[3 * 4 + row] * b[c * 4 + 3];
-}
-
-static void GR_EnsureShadowTarget(void)
-{
-	if (g_shadowFBO != 0)
-		return;
-
-	glGenTextures(1, &g_shadowDepthTex);
-	glBindTexture(GL_TEXTURE_2D, g_shadowDepthTex);
-	glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, PSYX_SHADOW_MAP_SIZE, PSYX_SHADOW_MAP_SIZE,
-	             0, GL_DEPTH_COMPONENT, GL_FLOAT, NULL);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
-	{
-		float border[4] = { 1.0f, 1.0f, 1.0f, 1.0f };  /* outside the light frustum = fully lit */
-		glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, border);
-	}
-	glBindTexture(GL_TEXTURE_2D, 0);
-
-	glGenFramebuffers(1, &g_shadowFBO);
-	glBindFramebuffer(GL_FRAMEBUFFER, g_shadowFBO);
-	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, g_shadowDepthTex, 0);
-	glDrawBuffer(GL_NONE);
-	glReadBuffer(GL_NONE);
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
-
-	if (g_shadowDepthShader == (ShaderID)-1)
-	{
-		g_shadowDepthShader = GR_Shader_Compile(s_shadowDepthShaderSrc);
-		g_shadowDepthMatrixLoc = glGetUniformLocation(g_shadowDepthShader, "u_shadowMatrix");
-	}
-}
-
-static void GR_BuildShadowMatrix(void)
-{
-	float sizeActive = g_PsyX_FlashlightFpsMode ? g_PsyX_FlashlightSizeFps : g_PsyX_FlashlightSize;
-	float flOuter = 1.0f - sizeActive * (1.0f - g_PsyX_FlashlightOuterCos);
-	if (flOuter < 0.05f)  flOuter = 0.05f;
-	if (flOuter > 0.999f) flOuter = 0.999f;
-
-	float fov = acosf(flOuter) * 2.0f * 1.25f;  /* widen past the cone so edge shadows aren't clipped */
-	if (fov > 2.9f) fov = 2.9f;
-	if (fov < 0.2f) fov = 0.2f;
-
-	float zn = 20.0f;
-	float zf = g_PsyX_FlashlightRange * 1.3f;
-	if (zf < zn + 1.0f) zf = zn + 1.0f;
-	g_shadowZNear = zn;
-	g_shadowZFar  = zf;
-
-	/* FPS pins the CONE at the eye (so the beam follows the view), but the shadow
-	 * must originate at the REAL light (chest/hand) — else the depth map is the
-	 * camera's own view and the shadow either vanishes or floats beside the object.
-	 * g_PsyX_FlashlightShadowPos carries that true light position (== FlashlightPos
-	 * in TPS). */
-	const float* srcPos = g_PsyX_FlashlightFpsMode ? g_PsyX_FlashlightShadowPos : g_PsyX_FlashlightPos;
-	float eye[3] = { srcPos[0], srcPos[1], srcPos[2] };
-	float dir[3] = { g_PsyX_FlashlightDir[0], g_PsyX_FlashlightDir[1], g_PsyX_FlashlightDir[2] };
-	sh_normalize3(dir);
-	/* Optional fine-tune: nudge the shadow light back along -viewDir. Default 0
-	 * (pure physical light position); `shadowfpsdrop` lets the user dial extra
-	 * parallax if a scene wants it. */
-	if (g_PsyX_FlashlightFpsMode && g_PsyX_FlashlightShadowFpsDrop != 0.0f)
-	{
-		eye[0] -= dir[0] * g_PsyX_FlashlightShadowFpsDrop;
-		eye[1] -= dir[1] * g_PsyX_FlashlightShadowFpsDrop;
-		eye[2] -= dir[2] * g_PsyX_FlashlightShadowFpsDrop;
-	}
-	float center[3] = { eye[0] + dir[0], eye[1] + dir[1], eye[2] + dir[2] };
-
-	float up[3] = { 0.0f, 1.0f, 0.0f };
-	if (fabsf(sh_dot3(dir, up)) > 0.99f) { up[0] = 1.0f; up[1] = 0.0f; up[2] = 0.0f; }
-
-	float proj[16], view[16];
-	sh_perspective(fov, 1.0f, zn, zf, proj);
-	sh_lookat(eye, center, up, view);
-	sh_mul(proj, view, g_shadowLightMatrix);
-}
-
-int GR_FlashlightShadowActive(void)
-{
-	/* g_PsyX_ShadowsAllowed is re-armed by the game only during settled gameplay
-	 * (see its definition). Outside that — menus, room-load fades, cutscenes and
-	 * frozen/transition frames (g_PsxPresentLastFrame) — the light-POV depth
-	 * pre-pass corrupts unrelated rendering (white flash on room/inventory/map
-	 * transitions, Harry's face dropping out on the options screen). Shadows are a
-	 * live-gameplay-only effect. */
-	return (g_PsyX_UseFlashlightShadows && g_PsyX_UsePerPixelFlashlight &&
-	        g_PsyX_FlashlightActive && g_PsyX_ShadowsAllowed &&
-	        !g_PsxPresentLastFrame) ? 1 : 0;
-}
-
-static GLint s_shadowPrevFBO = 0;
-static GLint s_shadowPrevViewport[4] = { 0, 0, 0, 0 };
-
-void GR_ShadowPassBegin(void)
-{
-	GR_EnsureShadowTarget();
-	GR_BuildShadowMatrix();
-
-	glGetIntegerv(GL_FRAMEBUFFER_BINDING, &s_shadowPrevFBO);
-	glGetIntegerv(GL_VIEWPORT, s_shadowPrevViewport);
-
-	glBindFramebuffer(GL_FRAMEBUFFER, g_shadowFBO);
-	glViewport(0, 0, PSYX_SHADOW_MAP_SIZE, PSYX_SHADOW_MAP_SIZE);
-
-	glDisable(GL_SCISSOR_TEST);
-	glDisable(GL_STENCIL_TEST);
-	glDisable(GL_BLEND);
-	glEnable(GL_DEPTH_TEST);
-	glDepthMask(GL_TRUE);
-	glDepthFunc(GL_LESS);
-	glClear(GL_DEPTH_BUFFER_BIT);
-
-	glEnable(GL_POLYGON_OFFSET_FILL);
-	glPolygonOffset(1.5f, 1.0f);
-
-	glUseProgram(g_shadowDepthShader);
-	if (g_shadowDepthMatrixLoc != -1)
-		glUniformMatrix4fv(g_shadowDepthMatrixLoc, 1, GL_FALSE, g_shadowLightMatrix);
-}
-
-void GR_ShadowPassDraw(int startVertex, int numVerts)
-{
-	glDrawArrays(GL_TRIANGLES, startVertex, numVerts);
-}
-
-void GR_ShadowPassEnd(void)
-{
-	glDisable(GL_POLYGON_OFFSET_FILL);
-	glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)s_shadowPrevFBO);
-	glViewport(s_shadowPrevViewport[0], s_shadowPrevViewport[1],
-	           s_shadowPrevViewport[2], s_shadowPrevViewport[3]);
-	glDepthFunc(GL_LEQUAL);  /* restore the renderer default; the pass set GL_LESS */
-
-	/* We changed program/depth/blend/scissor/stencil. Sentinels that never equal a
-	 * real mode force the first color split to fully re-establish GL state. */
-	glUseProgram(0);
-	g_PreviousShader       = (ShaderID)-1;
-	g_lastBoundTexture     = (TextureID)-1;
-	g_PreviousBlendMode    = -999;
-	g_PreviousDepthMode    = -999;
-	g_PreviousStencilMode  = -999;
-	g_PreviousScissorState = -999;
-	glEnable(GL_STENCIL_TEST);
-}
-
-#else  /* !USE_OPENGL */
-int  GR_FlashlightShadowActive(void) { return 0; }
-void GR_ShadowPassBegin(void) {}
-void GR_ShadowPassDraw(int startVertex, int numVerts) { (void)startVertex; (void)numVerts; }
-void GR_ShadowPassEnd(void) {}
 #endif
+	g_PreviousOffscreenState = -1;
+	g_PreviousOffscreen.x = 0;
+	g_PreviousOffscreen.y = 0;
+	g_PreviousOffscreen.w = 0;
+	g_PreviousOffscreen.h = 0;
+	if (g_windowWidth > 0 && g_windowHeight > 0)
+		GR_SetViewPort(0, 0, g_windowWidth, g_windowHeight);
+}
 
-/* See g_PsxPresentLastFrame above. Called from PsyX_EndScene after the
- * frame is fully composed in the backbuffer, before the swap. */
 void GR_CaptureLastFrame(void)
 {
 #if USE_OPENGL && USE_FRAMEBUFFER_BLIT
@@ -3126,6 +3352,12 @@ void GR_PresentLastFrame(void)
 
 	g_freezePresentedThisFrame = 1;
 #endif
+}
+
+void GR_InvalidateLastFrame(void)
+{
+	g_freezeFrameValid = 0;
+	g_freezePresentedThisFrame = 0;
 }
 
 void GR_StoreFrameBuffer(int x, int y, int w, int h)
